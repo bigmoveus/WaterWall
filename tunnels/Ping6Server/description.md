@@ -60,7 +60,9 @@ Decoded data uses `tunnelNextUpStreamPayload()`. Generated replies and server-or
 | `tos` | no | `0` | TOS for local requests, integer `0..255`; replies copy request TOS. |
 | `send-replies` | no | `false` | Send exact Echo Replies to peer requests when true. |
 
-Unknown settings are rejected. Explicit IPv6 values must be single addresses without brackets, zones, CIDR suffixes, or arrays. They are used only for the ICMPv6 checksum pseudo-header and do not configure an IPv6 adapter or route. The paired client normally reverses both local/peer pairs; with defaults, only reversed IPv4 settings are necessary.
+Unknown settings are rejected. IPv4 values must be one plain dotted-quad address: four decimal fields without leading zeros. Explicit IPv6 values must be single addresses without brackets, zones, CIDR suffixes, or arrays. They are used only for the ICMPv6 checksum pseudo-header and do not configure an IPv6 adapter or route. The paired client normally reverses both local/peer pairs; with defaults, only reversed IPv4 settings are necessary.
+
+The default pseudo-addresses come from each endpoint's own `local-ipv4`/`peer-ipv4`. If address translation makes the two endpoints see different outer IPv4 addresses, set `local-ipv6` and `peer-ipv6` explicitly on both sides; otherwise every carrier fails ICMPv6 checksum validation. The checksum covers the pair as a whole and does not change when the two values are swapped, so it cannot verify direction.
 
 For RawSocket capture, select `capture-protocols: [58]` with the client's source address range.
 
@@ -76,6 +78,13 @@ ICMPv6 checksum covers the complete Echo message plus the standard pseudo-header
 - Rejections use `ERROR` network logs with a shared five-second rate limiter.
 
 Ping6 provides no encryption, authentication, retransmission, PMTU discovery, TCP MSS adjustment, NDP, general ICMPv6 errors, direct IPv6-host delivery, or guaranteed DPI evasion.
+
+## Examples
+
+- [examples/server-tun](examples/server-tun/config.json): `RawSocket -> Ping6Server -> TunDevice` with TUN `10.58.0.2/30`.
+- [client example](../Ping6Client/examples/client-tun/config.json): the peer, `TunDevice -> Ping6Client -> RawSocket` with TUN `10.58.0.1/30`.
+
+Replace the documentation public addresses `192.0.2.10` and `198.51.100.10`, then run each side from its example directory with its `core.json`. The [examples guide](../Ping6Client/examples/README.md) covers requirements, verification, MTU, and multi-uplink hosts.
 
 ## Node Metadata
 
