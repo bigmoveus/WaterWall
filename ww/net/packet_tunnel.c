@@ -328,6 +328,6 @@ device_opaque_flow_mode_t packettunnelResolveOpaqueFlowMode(tunnel_t *t, device_
             return kDeviceOpaqueFlowPeer;
         }
     }
-    *reason = "no direct Ping or Ping6 decoder in receive direction";
+    *reason = "no direct Ping decoder in receive direction";
     return kDeviceOpaqueFlowPrefix;
 }

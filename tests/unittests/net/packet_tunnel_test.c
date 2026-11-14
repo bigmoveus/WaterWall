@@ -400,6 +400,11 @@ static void testOpaqueFlowModeResolution(void)
         require(packettunnelResolveOpaqueFlowMode(device, kDeviceOpaqueFlowAuto, &reason) == cases[i].expected &&
                     reason != NULL && reason[0] != '\0',
                 "auto selected wrong mode for receive direction and exact immediate type");
+        if (cases[i].expected == kDeviceOpaqueFlowPrefix)
+        {
+            require(stringCompare(reason, "no direct Ping decoder in receive direction") == 0,
+                    "non-decoder auto mode changed its legacy diagnostic reason");
+        }
         for (device_opaque_flow_mode_t explicit_mode = kDeviceOpaqueFlowPrefix;
              explicit_mode <= kDeviceOpaqueFlowSpread;
              ++explicit_mode)
