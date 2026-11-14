@@ -35,6 +35,12 @@ static bool ping6clientRejectUnknownSettings(const cJSON *settings)
 {
     for (const cJSON *item = settings != NULL ? settings->child : NULL; item != NULL; item = item->next)
     {
+        if (item->string == NULL || (item->type & cJSON_NameHasEmbeddedNul) != 0 ||
+            ! configLexicalCheckEncodingQuiet(item->string, stringLength(item->string)))
+        {
+            LOGF("Ping6Client: configuration contains an invalid or embedded-NUL setting name");
+            return false;
+        }
         if (ping6clientSettingIsSupported(item->string))
         {
             continue;
@@ -73,6 +79,11 @@ static bool ping6clientLoadInteger(int *dest, const cJSON *settings, const char 
 
 static bool ping6clientLoadRequiredIpv4(uint32_t *destination, const cJSON *settings, const char *key)
 {
+    if (! jsonObjectFieldStringsAreExact(settings, key))
+    {
+        LOGF("JSON Error: Ping6Client->settings->%s (string field) : invalid embedded-NUL or encoding", key);
+        return false;
+    }
     const char         *address = NULL;
     json_value_status_t status  = jsonGetObjectNonEmptyString(settings, key, &address);
     if (status == kJsonValueMissing)
@@ -121,6 +132,11 @@ static bool ping6clientLoadOptionalIpv6(ip6_addr_t *destination, const cJSON *se
 
 static bool ping6clientLoadIdentifier(ping6client_tstate_t *state, const cJSON *settings)
 {
+    if (! jsonObjectFieldStringsAreExact(settings, "identifier"))
+    {
+        LOGF("JSON Error: Ping6Client->settings->identifier (int or string field) : invalid embedded-NUL or encoding");
+        return false;
+    }
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(settings, "identifier");
     if (item == NULL ||
         (cJSON_IsString(item) && item->valuestring != NULL && stringCompare(item->valuestring, "random") == 0))

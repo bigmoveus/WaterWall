@@ -74,9 +74,12 @@ static const char *ping6serverConsumeCarrierChecksum(ping6server_tstate_t *state
     if (outer.source_address != state->wire.peer_ipv4 || outer.destination_address != state->wire.local_ipv4 ||
         outer.protocol != kPing6WireProtocol)
     {
+        sbufSetRecalculateChecksum(buf, true);
         return NULL;
     }
-    return ping6wireRecalculateCarrierChecksums(buf, &state->wire) ? NULL : "requested Ping6 checksum repair failed";
+    return ping6wireRecalculateCarrierChecksums(buf, &state->wire.peer_ipv6, &state->wire.local_ipv6)
+               ? NULL
+               : "requested Ping6 checksum repair failed";
 }
 
 void ping6serverHandleDownstreamPacket(tunnel_t *t, line_t *l, sbuf_t *buf)

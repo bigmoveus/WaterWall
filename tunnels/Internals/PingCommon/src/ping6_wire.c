@@ -81,10 +81,6 @@ bool ping6wireBuildEchoRequest(sbuf_t *buf, const ping6_wire_config_t *config, u
 
 static const char *ping6wireOuterIpv4Error(const uint8_t *packet, uint32_t length, ipv4_packet_view_t *view_out)
 {
-    if (length > kMaxAllowedPacketLength)
-    {
-        return "outer IPv4 packet exceeds maximum carrier size";
-    }
     const char *error = pingwireIpv4PacketError(packet, length);
     if (error != NULL)
     {
@@ -123,6 +119,11 @@ ping_wire_inbound_kind_t ping6wireParseInbound(const uint8_t *packet, uint32_t l
         outer.protocol != kPing6WireProtocol)
     {
         return kPingWireInboundUnrelated;
+    }
+    if (length > kMaxAllowedPacketLength)
+    {
+        envelope_out->error_reason = "outer IPv4 packet exceeds maximum carrier size";
+        return kPingWireInboundInvalidCarrier;
     }
     if (outer.ip_header_length != kPing6WireIpv4HeaderLength)
     {
@@ -241,9 +242,9 @@ bool ping6wireStripEchoRequest(sbuf_t *buf, const ping6_wire_envelope_t *request
     return true;
 }
 
-bool ping6wireRecalculateCarrierChecksums(sbuf_t *buf, const ping6_wire_config_t *config)
+bool ping6wireRecalculateCarrierChecksums(sbuf_t *buf, const ip6_addr_t *source, const ip6_addr_t *destination)
 {
-    if (buf == NULL || config == NULL || sbufGetLength(buf) > kMaxAllowedPacketLength)
+    if (buf == NULL || source == NULL || destination == NULL || sbufGetLength(buf) > kMaxAllowedPacketLength)
     {
         return false;
     }
@@ -253,23 +254,6 @@ bool ping6wireRecalculateCarrierChecksums(sbuf_t *buf, const ping6_wire_config_t
     if (! ipv4packetviewParse(packet, sbufGetLength(buf), &view) || view.ip_total_length != sbufGetLength(buf) ||
         view.ip_header_length != kPing6WireIpv4HeaderLength || view.fragmented || view.protocol != kPing6WireProtocol ||
         view.transport_length < kPing6WireIcmpHeaderLength)
-    {
-        return false;
-    }
-
-    const ip6_addr_t *source      = NULL;
-    const ip6_addr_t *destination = NULL;
-    if (view.source_address == config->local_ipv4 && view.destination_address == config->peer_ipv4)
-    {
-        source      = &config->local_ipv6;
-        destination = &config->peer_ipv6;
-    }
-    else if (view.source_address == config->peer_ipv4 && view.destination_address == config->local_ipv4)
-    {
-        source      = &config->peer_ipv6;
-        destination = &config->local_ipv6;
-    }
-    else
     {
         return false;
     }

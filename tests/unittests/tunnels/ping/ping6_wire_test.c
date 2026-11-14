@@ -398,7 +398,8 @@ static void testMappedAddressesAndChecksumRepair(void)
     struct ip_hdr *outer = (struct ip_hdr *) sbufGetMutablePtr(request);
     IPH_CHKSUM_SET(outer, 0);
     icmp6Header(request)->chksum = 0;
-    require(ping6wireRecalculateCarrierChecksums(request, &server), "inbound-direction checksum repair failed");
+    require(ping6wireRecalculateCarrierChecksums(request, &server.peer_ipv6, &server.local_ipv6),
+            "inbound-direction checksum repair failed");
     requireValidCarrier(request, &client);
 
     ping6_wire_envelope_t view = {0};
@@ -424,7 +425,8 @@ static void testMappedAddressesAndChecksumRepair(void)
                                 &client.local_ipv6,
                                 &client.peer_ipv6) == 0)
         {
-            require(ping6wireRecalculateCarrierChecksums(request, &client), "zero-checksum repair failed");
+            require(ping6wireRecalculateCarrierChecksums(request, &client.local_ipv6, &client.peer_ipv6),
+                    "zero-checksum repair failed");
             require(icmp->chksum == 0, "ICMPv6 zero checksum was replaced with UDP-style all-ones");
             requireValidCarrier(request, &client);
             found_zero = true;
@@ -432,6 +434,51 @@ static void testMappedAddressesAndChecksumRepair(void)
         }
     }
     require(found_zero, "could not construct an ICMPv6 zero-checksum vector");
+    sbufDestroy(request);
+}
+
+static void testUnrelatedOversizeAndEqualAddressRepair(void)
+{
+    ping6_wire_config_t       client = clientConfig();
+    const ping6_wire_config_t server = serverConfig(&client);
+    ping6_wire_envelope_t     view   = {0};
+
+    sbuf_t        *unrelated = makeInnerPacket(kMaxAllowedPacketLength + 1U, 0);
+    struct ip_hdr *ip        = (struct ip_hdr *) sbufGetMutablePtr(unrelated);
+    ip->src.addr             = ipv4Address("203.0.113.99");
+    ip->dest.addr            = server.local_ipv4;
+    require(calcIpv4HeaderChecksum(sbufGetMutablePtr(unrelated), sbufGetLength(unrelated)),
+            "oversized unrelated IPv4 checksum failed");
+    require(ping6wireParseInbound(sbufGetRawPtr(unrelated), sbufGetLength(unrelated), &server, &view) ==
+                kPingWireInboundUnrelated,
+            "valid unrelated IPv4 over 1500 bytes was not preserved");
+    sbufDestroy(unrelated);
+
+    sbuf_t *addressed = makeInnerPacket(kMaxAllowedPacketLength + 1U, 0);
+    ip                = (struct ip_hdr *) sbufGetMutablePtr(addressed);
+    ip->src.addr      = client.local_ipv4;
+    ip->dest.addr     = client.peer_ipv4;
+    IPH_PROTO_SET(ip, kPing6WireProtocol);
+    require(calcIpv4HeaderChecksum(sbufGetMutablePtr(addressed), sbufGetLength(addressed)),
+            "oversized addressed IPv4 checksum failed");
+    require(ping6wireParseInbound(sbufGetRawPtr(addressed), sbufGetLength(addressed), &server, &view) ==
+                kPingWireInboundInvalidCarrier,
+            "oversized addressed carrier did not get a carrier-specific rejection");
+    sbufDestroy(addressed);
+
+    client.peer_ipv4                       = client.local_ipv4;
+    const ping6_wire_config_t equal_server = serverConfig(&client);
+    sbuf_t                   *request      = makeInnerPacket(81, 0);
+    require(ping6wireBuildEchoRequest(request, &client, 12), "equal-address request build failed");
+    struct ip_hdr *outer = (struct ip_hdr *) sbufGetMutablePtr(request);
+    IPH_CHKSUM_SET(outer, 0);
+    icmp6Header(request)->chksum = 0;
+    require(ping6wireRecalculateCarrierChecksums(request, &equal_server.peer_ipv6, &equal_server.local_ipv6),
+            "equal-IPv4 inbound checksum repair failed");
+    requireValidCarrier(request, &client);
+    require(ping6wireParseInbound(sbufGetRawPtr(request), sbufGetLength(request), &equal_server, &view) ==
+                kPingWireInboundEchoRequest,
+            "equal-IPv4 request with distinct pseudo-addresses was rejected");
     sbufDestroy(request);
 }
 
@@ -445,6 +492,7 @@ int main(void)
     testRequestReplyAndIndependentChecksums();
     testBoundsAndMalformedMatrix();
     testMappedAddressesAndChecksumRepair();
+    testUnrelatedOversizeAndEqualAddressRepair();
 
     wCryptoGlobalCleanup();
     puts("ping6_wire_test: all cases passed");

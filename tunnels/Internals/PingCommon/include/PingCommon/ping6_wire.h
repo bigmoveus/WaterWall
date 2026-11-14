@@ -43,6 +43,7 @@ WW_EXPORT ping_wire_inbound_kind_t ping6wireParseInbound(const uint8_t *packet, 
 WW_EXPORT bool ping6wireBuildEchoReply(sbuf_t *buf, const ping6_wire_config_t *config,
                                        const ping6_wire_envelope_t *request, uint16_t ipv4_identification);
 WW_EXPORT bool ping6wireStripEchoRequest(sbuf_t *buf, const ping6_wire_envelope_t *request);
-WW_EXPORT bool ping6wireRecalculateCarrierChecksums(sbuf_t *buf, const ping6_wire_config_t *config);
+WW_EXPORT bool ping6wireRecalculateCarrierChecksums(sbuf_t *buf, const ip6_addr_t *source,
+                                                    const ip6_addr_t *destination);
 
 #endif /* PING_COMMON_PING6_WIRE_H_ */
