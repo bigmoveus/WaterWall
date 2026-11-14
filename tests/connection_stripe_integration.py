@@ -59,6 +59,10 @@ LANES = 8
 SESSIONS = 3
 BODY_SIZE = 2 << 20
 GREETING = b"stripe-ready"
+# Under strace -yy the first traced call on each socket costs a sock_diag dump of the kernel's whole TCP
+# table (about 10 ms) while the runtime waits. Eight carriers then take up to a few hundred milliseconds
+# to join, so the relay topology's setup deadline has to stay well above that.
+SETUP_TIMEOUT_MS = 1000
 
 
 class CarrierRelay:
@@ -242,7 +246,8 @@ def topology(carrier, *, relay=False, mux=False):
         ]
     nodes += [
         {"name": "stripe-server", "type": "ConnectionStripeServer", "next": "mux-server" if mux else "backend",
-         "settings": {"max-connections": LANES, **({"setup-timeout-ms": 100} if relay and not mux else {})}},
+         "settings": {"max-connections": LANES,
+                      **({"setup-timeout-ms": SETUP_TIMEOUT_MS} if relay and not mux else {})}},
         {"name": "backend", "type": "TcpConnector",
          "settings": {"address": HOST, "port": BACKEND_PORT, "nodelay": True, "fastopen": False}},
     ]
@@ -371,7 +376,8 @@ def setup_expiry(process, backend):
                         b"unpaired-session" + struct.pack("!HHI", 0, LANES, 1 << 20))
     for introduction in (b"\x01\x00", incomplete_group):
         with socket.create_connection((HOST, WIRE_PORT), timeout=3) as connection:
-            connection.settimeout(3)
+            # The deadline, then up to a second for the coarse sweep.
+            connection.settimeout(SETUP_TIMEOUT_MS / 1000 + 3)
             connection.sendall(introduction)
             assert connection.recv(1) == b"", "incomplete stripe setup did not expire"
         process.check_running("expiring incomplete stripe setup terminated the runtime")
