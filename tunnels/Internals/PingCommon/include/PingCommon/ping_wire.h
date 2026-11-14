@@ -136,6 +136,9 @@ WW_EXPORT bool pingwireIsExactIpv4Packet(const uint8_t *packet, uint32_t length)
 /* Validate exact IPv4 framing; return a static failure reason or NULL on success. */
 WW_EXPORT const char *pingwireIpv4PacketError(const uint8_t *packet, uint32_t length);
 
+/* The same validation, also filling the view of an accepted packet. */
+WW_EXPORT const char *pingwireIpv4PacketErrorWithView(const uint8_t *packet, uint32_t length, ipv4_packet_view_t *view);
+
 /* Resolve an explicit identifier or accept one injected random candidate. */
 WW_EXPORT bool pingwireSelectIdentifier(bool random, uint16_t configured, uint16_t random_candidate,
                                         uint16_t *identifier_out);

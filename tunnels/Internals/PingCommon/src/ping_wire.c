@@ -16,7 +16,7 @@ static bool pingwireIcmpChecksumIsValid(const uint8_t *packet, uint16_t length)
     return inet_chksum(packet, length) == 0;
 }
 
-static const char *pingwireIpv4PacketErrorWithView(const uint8_t *packet, uint32_t length, ipv4_packet_view_t *view)
+const char *pingwireIpv4PacketErrorWithView(const uint8_t *packet, uint32_t length, ipv4_packet_view_t *view)
 {
     if (packet == NULL || length < IP_HLEN)
     {

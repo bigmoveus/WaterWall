@@ -97,14 +97,13 @@ static bool ping6clientLoadRequiredIpv4(uint32_t *destination, const cJSON *sett
         return false;
     }
 
-    ip4_addr_t parsed = {0};
-    if (ip4AddrAddressToNetwork(address, &parsed) == 0)
+    if (! ping6wireParseIpv4Text(address, destination))
     {
-        LOGF("JSON Error: Ping6Client->settings->%s (string field) : expected a single IPv4 address", key);
+        LOGF("JSON Error: Ping6Client->settings->%s (string field) : expected a single IPv4 address as four decimal "
+             "fields without leading zeros",
+             key);
         return false;
     }
-
-    *destination = ip4AddrGetU32(&parsed);
     return true;
 }
 
@@ -118,9 +117,7 @@ static bool ping6clientLoadOptionalIpv6(ip6_addr_t *destination, const cJSON *se
         return true;
     }
     if (! jsonObjectFieldStringsAreExact(settings, key) || ! cJSON_IsString(item) || item->valuestring == NULL ||
-        item->valuestring[0] == '\0' || stringChr(item->valuestring, '/') != NULL ||
-        stringChr(item->valuestring, '%') != NULL || stringChr(item->valuestring, '[') != NULL ||
-        stringChr(item->valuestring, ']') != NULL || ip6addr_aton(item->valuestring, destination) == 0)
+        ! ping6wireParseIpv6Text(item->valuestring, destination))
     {
         LOGF("JSON Error: Ping6Client->settings->%s (string field) : expected one IPv6 address without brackets, "
              "zone, or prefix",

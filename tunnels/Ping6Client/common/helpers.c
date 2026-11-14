@@ -55,8 +55,9 @@ static const char *ping6clientConsumeInnerChecksum(sbuf_t *buf)
 
 static const char *ping6clientConsumeCarrierChecksum(ping6client_tstate_t *state, sbuf_t *buf)
 {
-    const bool  requested = packettunnelTakeChecksumRequest(buf);
-    const char *error     = pingwireIpv4PacketError(sbufGetRawPtr(buf), sbufGetLength(buf));
+    const bool         requested = packettunnelTakeChecksumRequest(buf);
+    ipv4_packet_view_t outer     = {0};
+    const char        *error     = pingwireIpv4PacketErrorWithView(sbufGetRawPtr(buf), sbufGetLength(buf), &outer);
     if (error != NULL)
     {
         return error;
@@ -66,20 +67,18 @@ static const char *ping6clientConsumeCarrierChecksum(ping6client_tstate_t *state
         return NULL;
     }
 
-    ipv4_packet_view_t outer = {0};
-    if (! ipv4packetviewParse(sbufGetRawPtr(buf), sbufGetLength(buf), &outer))
-    {
-        return "invalid outer IPv4 packet";
-    }
     if (outer.source_address != state->wire.peer_ipv4 || outer.destination_address != state->wire.local_ipv4 ||
         outer.protocol != kPing6WireProtocol)
     {
         sbufSetRecalculateChecksum(buf, true);
         return NULL;
     }
-    return ping6wireRecalculateCarrierChecksums(buf, &state->wire.peer_ipv6, &state->wire.local_ipv6)
-               ? NULL
-               : "requested Ping6 checksum repair failed";
+    if (! ping6wireRecalculateCarrierChecksums(buf, &state->wire.peer_ipv6, &state->wire.local_ipv6))
+    {
+        /* Not a repairable carrier shape: settle the outer header so the parser can name the exact reason. */
+        discard calcIpv4HeaderChecksum(sbufGetMutablePtr(buf), sbufGetLength(buf));
+    }
+    return NULL;
 }
 
 void ping6clientEncapsulatePacket(tunnel_t *t, line_t *l, sbuf_t *buf)
@@ -139,6 +138,12 @@ void ping6clientDecapsulatePacket(tunnel_t *t, line_t *l, sbuf_t *buf)
     if (input_error != NULL)
     {
         ping6clientDrop(t, l, buf, "incoming", input_error);
+        return;
+    }
+    if (sbufGetRecalculateChecksum(buf))
+    {
+        /* Only unrelated traffic keeps its pending repair; its possibly stale checksums are not ours to judge. */
+        tunnelPrevDownStreamPayload(t, l, buf);
         return;
     }
 

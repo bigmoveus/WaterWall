@@ -35,6 +35,10 @@ typedef ping_wire_envelope_t ping6_wire_envelope_t;
 
 WW_EXPORT void ping6wireIpv4MappedAddress(uint32_t ipv4, ip6_addr_t *address_out);
 
+/* Parse exactly one bare address; lwIP's parsers alone accept trailing text and malformed fields. */
+WW_EXPORT bool ping6wireParseIpv4Text(const char *text, uint32_t *ipv4_out);
+WW_EXPORT bool ping6wireParseIpv6Text(const char *text, ip6_addr_t *address_out);
+
 WW_EXPORT bool ping6wireEchoRequestPreflight(const sbuf_t *buf);
 WW_EXPORT bool ping6wireBuildEchoRequest(sbuf_t *buf, const ping6_wire_config_t *config, uint16_t sequence);
 WW_EXPORT ping_wire_inbound_kind_t ping6wireParseInbound(const uint8_t *packet, uint32_t length,

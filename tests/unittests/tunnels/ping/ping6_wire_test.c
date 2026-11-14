@@ -406,6 +406,13 @@ static void testMappedAddressesAndChecksumRepair(void)
     require(ping6wireParseInbound(sbufGetRawPtr(request), sbufGetLength(request), &server, &view) ==
                 kPingWireInboundEchoRequest,
             "repaired request did not parse");
+    /* The pseudo-header sum commutes, so the checksum alone cannot tell a swapped local/peer pair apart. */
+    ping6_wire_config_t swapped = server;
+    swapped.local_ipv6          = server.peer_ipv6;
+    swapped.peer_ipv6           = server.local_ipv6;
+    require(ping6wireParseInbound(sbufGetRawPtr(request), sbufGetLength(request), &swapped, &view) ==
+                kPingWireInboundEchoRequest,
+            "swapped pseudo-address pair changed the commutative checksum");
     ping6_wire_config_t wrong_peer = server;
     wrong_peer.peer_ipv6           = ipv6Address("2001:db8::ffff");
     require(ping6wireParseInbound(sbufGetRawPtr(request), sbufGetLength(request), &wrong_peer, &view) ==
@@ -482,6 +489,71 @@ static void testUnrelatedOversizeAndEqualAddressRepair(void)
     sbufDestroy(request);
 }
 
+static void testStrictAddressText(void)
+{
+    const char *const valid_ipv4[] = {"0.0.0.0", "192.0.2.10", "255.255.255.255"};
+    for (size_t i = 0; i < ARRAY_SIZE(valid_ipv4); ++i)
+    {
+        uint32_t parsed = 0;
+        require(ping6wireParseIpv4Text(valid_ipv4[i], &parsed) && parsed == ipv4Address(valid_ipv4[i]),
+                "plain dotted-quad IPv4 text was rejected or misparsed");
+    }
+
+    /* Each of these is either accepted or silently reinterpreted by lwIP's own IPv4 parser. */
+    const char *const invalid_ipv4[] = {"",
+                                        "192.0.2",
+                                        "192.0.2.10.1",
+                                        "192.0.2.256",
+                                        "192.0.2.010",
+                                        "0xc0.0.2.10",
+                                        "192.0.2.10 ",
+                                        " 192.0.2.10",
+                                        "192.0.2.10x",
+                                        "192.0..10",
+                                        "1921.0.2.1",
+                                        "192.0.2.",
+                                        "3221225994",
+                                        "2001:db8::1"};
+    for (size_t i = 0; i < ARRAY_SIZE(invalid_ipv4); ++i)
+    {
+        uint32_t parsed = UINT32_C(0x5a5a5a5a);
+        require(! ping6wireParseIpv4Text(invalid_ipv4[i], &parsed) && parsed == UINT32_C(0x5a5a5a5a),
+                "lenient IPv4 text was accepted or wrote its output");
+    }
+
+    const char *const valid_ipv6[] = {"::", "2001:db8::10", "2001:DB8:0:0:0:0:0:10", "::ffff:192.0.2.10"};
+    for (size_t i = 0; i < ARRAY_SIZE(valid_ipv6); ++i)
+    {
+        const ip6_addr_t expected = ipv6Address(valid_ipv6[i]);
+        ip6_addr_t       parsed   = {0};
+        require(ping6wireParseIpv6Text(valid_ipv6[i], &parsed) &&
+                    memoryEqual(parsed.addr, expected.addr, sizeof(parsed.addr)),
+                "valid IPv6 text was rejected or misparsed");
+    }
+
+    /* lwIP's own IPv6 parser accepts the first eight of these: trailing text, an oversized group, loose tails. */
+    const char *const invalid_ipv6[] = {"2001:db8::1 ",
+                                        "2001:db8::1 2001:db8::2",
+                                        "2001:db8::1,2001:db8::2",
+                                        "2001:db8::1%eth0",
+                                        "2001:db8::1/128",
+                                        "2001:db8::12345",
+                                        "::ffff:192.0.2",
+                                        "::ffff:192.0.2.010",
+                                        "",
+                                        "[2001:db8::1]",
+                                        "192.0.2.1",
+                                        "1:2:3:4:5:6:7",
+                                        "1:2:3:4:5:6:7:8:9",
+                                        "1::2::3",
+                                        "2001:db8::g"};
+    for (size_t i = 0; i < ARRAY_SIZE(invalid_ipv6); ++i)
+    {
+        ip6_addr_t parsed = {0};
+        require(! ping6wireParseIpv6Text(invalid_ipv6[i], &parsed), "malformed IPv6 text was accepted");
+    }
+}
+
 int main(void)
 {
     testCaseSet("ping6_wire_test");
@@ -493,6 +565,7 @@ int main(void)
     testBoundsAndMalformedMatrix();
     testMappedAddressesAndChecksumRepair();
     testUnrelatedOversizeAndEqualAddressRepair();
+    testStrictAddressText();
 
     wCryptoGlobalCleanup();
     puts("ping6_wire_test: all cases passed");

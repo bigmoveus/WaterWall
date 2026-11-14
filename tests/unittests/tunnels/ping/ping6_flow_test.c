@@ -765,6 +765,23 @@ static void caseUnrelatedIpv4Options(flow_fixture_t *fixture)
     twfRequire(forwarded->length == expected.length && memoryEqual(forwarded->bytes, expected.bytes, expected.length),
                "unrelated tuple did not pass through unchanged");
     twfRequire(forwarded->checksum_requested, "unrelated tuple lost its checksum-repair request");
+
+    /* A pending repair means the outer checksum may still be stale; that is not a reason to drop unrelated traffic. */
+    packet        = makeInnerPacket(line, 96);
+    ip            = (struct ip_hdr *) sbufGetMutablePtr(packet);
+    ip->src.addr  = ipv4Address("203.0.113.99");
+    ip->dest.addr = config.local_ipv4;
+    twfRequire(inet_chksum(sbufGetRawPtr(packet), IP_HLEN) != 0, "stale-checksum fixture is accidentally valid");
+    sbufSetRecalculateChecksum(packet, true);
+    expected.length = sbufGetLength(packet);
+    memoryCopy(expected.bytes, sbufGetRawPtr(packet), expected.length);
+    sendInbound(fixture, 1, packet);
+
+    twfRequireEqualU32(decodedInnerSink(fixture)->count, 3, "unrelated packet awaiting checksum repair was dropped");
+    forwarded = &decodedInnerSink(fixture)->packets[2];
+    twfRequire(forwarded->length == expected.length && memoryEqual(forwarded->bytes, expected.bytes, expected.length),
+               "unrelated packet awaiting checksum repair did not pass through unchanged");
+    twfRequire(forwarded->checksum_requested, "unrelated stale packet lost its checksum-repair request");
 }
 
 static void caseChecksumRequestBoundaries(flow_fixture_t *fixture)
@@ -869,6 +886,14 @@ static void casePacketDiagnostics(flow_fixture_t *fixture)
     twfRequire(calcIpv4HeaderChecksum(sbufGetMutablePtr(fragment), sbufGetLength(fragment)),
                "fragment diagnostic fixture checksum failed");
     sendInbound(fixture, 0, fragment);
+    requireErrorLog("fragmented outer IPv4 Ping6 carrier");
+
+    /* A requested repair on a carrier shape that cannot be repaired still names the exact reason. */
+    resetDropLog(fixture);
+    sbuf_t *dirty_fragment = peerRequest(fixture, line, 116);
+    IPH_OFFSET_SET((struct ip_hdr *) sbufGetMutablePtr(dirty_fragment), lwip_htons(IP_MF));
+    sbufSetRecalculateChecksum(dirty_fragment, true);
+    sendInbound(fixture, 0, dirty_fragment);
     requireErrorLog("fragmented outer IPv4 Ping6 carrier");
 
     resetDropLog(fixture);
@@ -1050,12 +1075,25 @@ static void caseConfigurationValidation(bool server)
     for (size_t i = 0; i < ARRAY_SIZE(invalid_documents); ++i)
         requireRejectedSettings(server, cJSON_Parse(invalid_documents[i]));
 
-    const char *const invalid_ipv6[] = {
-        "null", "true", "\"\"", "\"192.0.2.1\"", "\"[2001:db8::1]\"", "\"2001:db8::1%eth0\"", "\"2001:db8::1/128\""};
+    const char *const invalid_ipv6[] = {"null",
+                                        "true",
+                                        "\"\"",
+                                        "\"192.0.2.1\"",
+                                        "\"[2001:db8::1]\"",
+                                        "\"2001:db8::1%eth0\"",
+                                        "\"2001:db8::1/128\"",
+                                        "\"2001:db8::1 2001:db8::2\"",
+                                        "\"2001:db8::1,2001:db8::2\"",
+                                        "\"2001:db8::1 \"",
+                                        "\"2001:db8::12345\"",
+                                        "\"::ffff:192.0.2\""};
     for (size_t i = 0; i < ARRAY_SIZE(invalid_ipv6); ++i)
         requireRejectedField(server, "local-ipv6", invalid_ipv6[i]);
     requireRejectedField(server, "local-ipv4", "\"not-an-ip\"");
     requireRejectedField(server, "peer-ipv4", "\"not-an-ip\"");
+    const char *const lenient_ipv4[] = {"\"192.0.2.10 x\"", "\"192.0.2\"", "\"0xc0.0.2.10\"", "\"192.0.2.010\""};
+    for (size_t i = 0; i < ARRAY_SIZE(lenient_ipv4); ++i)
+        requireRejectedField(server, "local-ipv4", lenient_ipv4[i]);
     requireRejectedField(server, "unknown-setting", "true");
     requireRejectedField(server, "sequence-start", "-1");
     requireRejectedField(server, "sequence-start", "65536");

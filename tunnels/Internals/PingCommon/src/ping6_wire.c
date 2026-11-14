@@ -10,6 +10,7 @@ static uint32_t ping6wireSumIpv6Address(const ip6_addr_t *address, uint32_t sum)
     return sum;
 }
 
+/* The sum commutes: swapping source and destination gives the same checksum, so it cannot prove a direction. */
 static uint32_t ping6wirePseudoSeed(const ip6_addr_t *source, const ip6_addr_t *destination, uint32_t length)
 {
     uint32_t sum = ping6wireSumIpv6Address(source, 0);
@@ -32,6 +33,64 @@ void ping6wireIpv4MappedAddress(uint32_t ipv4, ip6_addr_t *address_out)
     memoryZero(address_out, sizeof(*address_out));
     address_out->addr[2] = lwip_htonl(UINT16_MAX);
     address_out->addr[3] = ipv4;
+}
+
+bool ping6wireParseIpv4Text(const char *text, uint32_t *ipv4_out)
+{
+    assert(text != NULL && ipv4_out != NULL);
+
+    /* lwIP alone also accepts hex, octal, short forms and trailing text; require one plain dotted quad. */
+    uint8_t bytes[4];
+    for (size_t field = 0; field < sizeof(bytes); ++field)
+    {
+        const char *first     = text;
+        const char  separator = field + 1U < sizeof(bytes) ? '.' : '\0';
+        uint32_t    value     = 0;
+        while (*text >= '0' && *text <= '9' && text - first < 3)
+        {
+            value = value * 10U + (uint32_t) (*text++ - '0');
+        }
+        if (text == first || value > UINT8_MAX || (text - first > 1 && *first == '0') || *text != separator)
+        {
+            return false;
+        }
+        bytes[field] = (uint8_t) value;
+        if (separator != '\0')
+        {
+            ++text;
+        }
+    }
+    memoryCopy(ipv4_out, bytes, sizeof(bytes));
+    return true;
+}
+
+bool ping6wireParseIpv6Text(const char *text, ip6_addr_t *address_out)
+{
+    assert(text != NULL && address_out != NULL);
+
+    /* lwIP stops at the first foreign character and lets an oversized group spill into its neighbour. */
+    const char *group = text;
+    for (const char *c = text; *c != '\0'; ++c)
+    {
+        if (*c == ':')
+        {
+            group = c + 1;
+        }
+        else if (*c == '.')
+        {
+            uint32_t embedded_ipv4;
+            if (! ping6wireParseIpv4Text(group, &embedded_ipv4))
+            {
+                return false;
+            }
+            break;
+        }
+        else if (! ((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'f') || (*c >= 'A' && *c <= 'F')) || c - group >= 4)
+        {
+            return false;
+        }
+    }
+    return ip6addr_aton(text, address_out) != 0;
 }
 
 bool ping6wireEchoRequestPreflight(const sbuf_t *buf)
@@ -81,14 +140,10 @@ bool ping6wireBuildEchoRequest(sbuf_t *buf, const ping6_wire_config_t *config, u
 
 static const char *ping6wireOuterIpv4Error(const uint8_t *packet, uint32_t length, ipv4_packet_view_t *view_out)
 {
-    const char *error = pingwireIpv4PacketError(packet, length);
+    const char *error = pingwireIpv4PacketErrorWithView(packet, length, view_out);
     if (error != NULL)
     {
         return error;
-    }
-    if (! ipv4packetviewParse(packet, length, view_out))
-    {
-        return "invalid outer IPv4 packet";
     }
     return inet_chksum(packet, view_out->ip_header_length) == 0 ? NULL : "invalid outer IPv4 checksum";
 }
