@@ -154,6 +154,11 @@
   endif()
 
   if(TARGET PingCommon)
+    waterwall_add_native_executable(ping6_wire_test SUPPORT SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/ping/ping6_wire_test.c)
+    target_link_libraries(ping6_wire_test PRIVATE PingCommon ww)
+    add_dependencies(waterwall_unit_tests ping6_wire_test)
+    add_waterwall_unit_test(waterwall.ping6_wire_unit ping6_wire_test "unit;ping;ping6;wire")
+
     waterwall_add_native_executable(ping_wire_test SUPPORT SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/ping/ping_wire_test.c)
     target_link_libraries(ping_wire_test PRIVATE PingCommon ww)
     add_dependencies(waterwall_unit_tests ping_wire_test)
