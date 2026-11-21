@@ -1860,6 +1860,13 @@ static void clientSizingCapture(tunnel_t *t, line_t *l, sbuf_t *buf)
 
     context->recovered_payload_len += payload_len;
     ++context->record_count;
+    /* A blocked adapter charges its write budget each queued record's whole allocation. */
+    buffer_pool_fit_t fit;
+    size_t            charge = 0;
+    requireClient(bufferpoolQueryBestFit(
+                      context->pool, record_len, bufferpoolGetLargeBufferPadding(context->pool), &fit) &&
+                      sbufTryGetQueueCharge(buf, &charge) && charge <= fit.allocation_charge,
+                  "client record occupies a larger buffer than the pool's best fit");
     bufferpoolReuseBuffer(context->pool, buf);
     if (context->kill_after_first_record)
     {
@@ -1875,7 +1882,8 @@ static void runClientSizingCase(uint16_t tls_version, const reality_v2_record_pr
     master_pool_t *medium_master = masterpoolCreateWithCapacity(8);
     master_pool_t *splice_master = masterpoolCreateWithCapacity(8);
     buffer_pool_t *pool          = bufferpoolCreate(
-        large_master, medium_master, small_master, 8, 65536, MEDIUM_BUFFER_SIZE_RAM_HIGH, 1024, 65536, 65536);
+        large_master, medium_master, small_master, 8, LARGE_BUFFER_SIZE_RAM_HIGH, MEDIUM_BUFFER_SIZE_RAM_HIGH, 1024,
+        65536, 65536);
     bufferpoolUpdateAllocationPaddings(pool,
                                        kRealityClientMaxFramePrefixSize,
                                        kRealityClientMaxFramePrefixSize,

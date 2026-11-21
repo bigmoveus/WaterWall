@@ -14,20 +14,14 @@ static void realityserverTerminalClose(tunnel_t *t, line_t *l, uint8_t alert, bo
 
 static sbuf_t *realityserverAllocFrameBuffer(buffer_pool_t *pool, uint32_t frame_len)
 {
-    uint32_t small_size = bufferpoolGetSmallBufferSize(pool);
-    uint32_t large_size = bufferpoolGetLargeBufferSize(pool);
-
-    if (frame_len <= small_size)
+    if (frame_len <= bufferpoolGetSmallBufferSize(pool))
     {
         return bufferpoolGetSmallBuffer(pool);
     }
 
-    if (frame_len <= large_size)
-    {
-        return bufferpoolGetLargeBuffer(pool);
-    }
-
-    return sbufCreateWithPadding(frame_len, bufferpoolGetLargeBufferPadding(pool));
+    // A full record is 16 KiB. In a large buffer each one would charge a blocked
+    // adapter's write budget the whole large allocation.
+    return bufferpoolGetBestFit(pool, frame_len, bufferpoolGetLargeBufferPadding(pool));
 }
 
 static sbuf_t *realityserverDuplicateBuffer(buffer_pool_t *pool, sbuf_t *buf)
