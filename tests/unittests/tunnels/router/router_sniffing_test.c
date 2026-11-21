@@ -1,5 +1,5 @@
 /*
- * Covers: Verifies Router sniffing config, resolver-DNS metadata matching and lifetime,
+ * Covers: Verifies Router sniffing config, line-mark and resolver-DNS metadata matching,
  * Host/:authority/SNI classification behavior, protocol bits,
  * HTTP upgrade attributes, cleartext HTTP/2 authority sniffing, and protected QUIC/HTTP3 Initial SNI
  * vectors when Router QUIC sniffing is compiled in. The QUIC vector generator is kept at
@@ -50,7 +50,8 @@
 
 static line_t *testLineCreate(void)
 {
-    line_t *line = memoryAllocateZero(sizeof(*line) + tunnelGetCorrectAlignedLineStateSize(sizeof(router_lstate_t)));
+    line_t *line =
+        memoryAllocateCacheAlignedZero(sizeof(*line) + tunnelGetCorrectAlignedLineStateSize(sizeof(router_lstate_t)));
     require(line != NULL, "failed to allocate test line");
     atomic_init(&line->refc, 1);
     memorySet(line->active_tunnels_mask, 0xFF, sizeof(line->active_tunnels_mask));
@@ -64,7 +65,7 @@ static void testLineDestroy(line_t *line)
     addresscontextReset(&line->routing_context.src_ctx);
     addresscontextReset(&line->routing_context.dest_ctx);
     lineClearUsers(line);
-    memoryFree(line);
+    memoryFreeAligned(line);
 }
 
 static cJSON *parseJsonObject(const char *text)
@@ -400,7 +401,7 @@ static router_match_t classifyOneRule(router_tstate_t *ts, router_rule_t *rule, 
                                       uint32_t payload_len)
 {
     router_lstate_t line_state;
-    routerLinestateInitialize(&line_state);
+    routerLinestateInitialize(&line_state, lineGetDestinationAddressContext(line));
     return classifyOneRuleWithState(ts, rule, line, &line_state, payload, payload_len);
 }
 
@@ -409,9 +410,12 @@ static router_match_t classifyNoRules(router_tstate_t *ts, line_t *line, const u
     ts->rules       = NULL;
     ts->rules_count = 0;
 
+    router_lstate_t line_state;
+    routerLinestateInitialize(&line_state, lineGetDestinationAddressContext(line));
     router_match_ctx_t mctx = {
         .router_state = ts,
         .line         = line,
+        .line_state   = &line_state,
         .payload      = payload,
         .payload_len  = payload_len,
     };
@@ -1040,11 +1044,11 @@ static void testResolverDnsMetadataLifetime(void)
     addresscontextSetResolverDns(&dns, true);
     addresscontextCopy(&copy, &dns);
     require(addresscontextIsResolverDns(&copy), "logical context copy lost resolver DNS origin");
-    copy.optional_flags.detected_protocols = kAddressContextProtocolTls | kAddressContextRouteFlagPinnedDestination;
+    copy.metadata_flags = kAddressContextProtocolTls | kAddressContextRouteFlagPinnedDestination;
     addresscontextClearDetectedProtocols(&copy);
     addresscontextSetOnlyProtocol(&copy, IP_PROTO_TCP);
     require(addresscontextIsResolverDns(&copy), "sniff or transport reset lost resolver DNS origin");
-    require(copy.optional_flags.detected_protocols == kAddressContextRouteFlagPinnedDestination,
+    require(copy.metadata_flags == kAddressContextRouteFlagPinnedDestination,
             "sniff reset changed independent route-control metadata");
     const uint8_t observed[] = "dns.example.test";
     require(addresscontextSetObservedDomain(&copy, observed, sizeof(observed) - 1U),
@@ -1077,7 +1081,7 @@ static void testRouterInitMatchesResolverDns(void)
             require(addresscontextSetIpAddressPortProtocol(dest, "203.0.113.53", 53, protocols[protocol]),
                     "failed to set resolver DNS Router destination");
             addresscontextSetResolverDns(dest, marked);
-            dest->optional_flags.detected_protocols = kAddressContextProtocolTls;
+            dest->metadata_flags = kAddressContextProtocolTls;
 
             tunnel_t *router   = tunnelCreate(NULL, sizeof(router_tstate_t), sizeof(router_lstate_t));
             tunnel_t *target   = tunnelCreate(NULL, 0, 0);
@@ -1111,7 +1115,7 @@ static void testRouterInitMatchesResolverDns(void)
             require(gRouterFallbackInitCalls == (marked != wanted),
                     "resolver DNS fallback selected incorrectly during Init");
             require(addresscontextIsResolverDns(dest) == marked, "Router Init changed resolver DNS origin");
-            require(dest->optional_flags.detected_protocols == 0, "Router Init did not clear detected protocols");
+            require(dest->metadata_flags == 0, "Router Init did not clear detected protocols");
             require(! addresscontextIsResolverDns(lineGetSourceAddressContext(line)),
                     "DNS destination marker contaminated source metadata");
 
@@ -1159,6 +1163,51 @@ static void testResolverDnsKeepsProtocolSniffing(void)
     testLineDestroy(line);
 }
 
+static void testLineMarkCondition(void)
+{
+    require(routerIsKnownConditionKey("line-mark"), "line-mark missing from known Router condition keys");
+    static const char *const invalid[] = {
+        "{\"line-mark\":null}",
+        "{\"line-mark\":17}",
+        "{\"line-mark\":[\"0123456789abcdef0123456789abcdef\"]}",
+        "{\"line-mark\":\"0123456789abcdef0123456789abcde\"}",
+        "{\"line-mark\":\"0123456789abcdef0123456789abcdef0\"}",
+        "{\"line-mark\":\"0123456789abcdef0123456789abcdeg\"}",
+        "{\"line-mark\":\"0123456789abcdef0123456789abcdef\\u0000suffix\"}",
+        "{\"line-mark\\u0000suffix\":\"0123456789abcdef0123456789abcdef\"}",
+    };
+    router_rule_t rule  = {0};
+    uint32_t      count = 0;
+    for (size_t i = 0; i < ARRAY_SIZE(invalid); ++i)
+    {
+        cJSON *json = parseJsonObject(invalid[i]);
+        require(! routerRuleParseConditions(&rule, json, 0, &count), "invalid line-mark condition accepted");
+        routerRuleDestroyConditions(&rule);
+        cJSON_Delete(json);
+    }
+    cJSON *json = parseJsonObject("{\"line-mark\":\"00000000000000000000000000000000\"}");
+    require(routerRuleParseConditions(&rule, json, 0, &count) && count == 1, "all-zero line mark failed to parse");
+    cJSON_Delete(json);
+
+    router_tstate_t ts   = {0};
+    line_t         *line = testLineCreate();
+    addresscontextSetOnlyProtocol(lineGetDestinationAddressContext(line), IP_PROTO_TCP);
+    rule.target_tunnel = (tunnel_t *) (uintptr_t) 0x95;
+    expectMatch(
+        "unset mark differs from all-zero", classifyOneRule(&ts, &rule, line, NULL, 0), kRouterClassifyDefault, NULL);
+    line_mark_t mark = {0};
+    lineSetMark(line, &mark);
+    expectMatch("present all-zero mark matches",
+                classifyOneRule(&ts, &rule, line, NULL, 0),
+                kRouterClassifyTarget,
+                rule.target_tunnel);
+    mark.bytes[kLineMarkSize - 1] = 1;
+    lineSetMark(line, &mark);
+    expectMatch("all 16 mark bytes matter", classifyOneRule(&ts, &rule, line, NULL, 0), kRouterClassifyDefault, NULL);
+    routerRuleDestroyConditions(&rule);
+    testLineDestroy(line);
+}
+
 static void testRouterInitEvaluatesOrderedMetadataPrefix(void)
 {
     const struct
@@ -1169,6 +1218,22 @@ static void testRouterInitEvaluatesOrderedMetadataPrefix(void)
         bool        dns;
         bool        sniff_domain;
     } cases[] = {
+        {"mark and carrier network select during Init",
+         "[{\"network\":\"udp\",\"line-mark\":\"0123456789abcdef0123456789abcdef\"},"
+         "{\"network\":\"tcp\",\"line-mark\":\"0123456789ABCDEF0123456789ABCDEF\"}]",
+         1,
+         false,
+         false},
+        {"different mark rules out a payload-dependent rule during Init",
+         "[{\"line-mark\":\"0123456789abcdef0123456789abcdee\",\"protocol\":\"tls\"},{\"network\":\"tcp\"}]",
+         1,
+         false,
+         false},
+        {"matching mark keeps payload-dependent rule eligible",
+         "[{\"line-mark\":\"0123456789abcdef0123456789abcdef\",\"protocol\":\"tls\"},{\"network\":\"tcp\"}]",
+         -1,
+         false,
+         false},
         {"DNS metadata precedes TLS", "[{\"resolver-dns\":true},{\"protocol\":\"tls\"}]", 0, true, false},
         {"unmatched metadata precedes DNS",
          "[{\"network\":\"udp\"},{\"resolver-dns\":true},{\"protocol\":\"tls\"}]",
@@ -1207,6 +1272,9 @@ static void testRouterInitEvaluatesOrderedMetadataPrefix(void)
             addresscontextSetIpAddressPortProtocol(&line->routing_context.dest_ctx, "203.0.113.53", 53, IP_PROTO_TCP),
             "failed to set ordered Router destination");
         addresscontextSetResolverDns(&line->routing_context.dest_ctx, cases[ci].dns);
+        line_mark_t mark;
+        require(lineMarkParseHex("0123456789abcdef0123456789abcdef", &mark), "invalid fixture line mark");
+        lineSetMark(line, &mark);
         tunnel_t *router = tunnelCreate(NULL, sizeof(router_tstate_t), sizeof(router_lstate_t));
         require(router != NULL, "failed to create ordered Router fixture");
         router_tstate_t *ts    = tunnelGetState(router);
@@ -1231,6 +1299,8 @@ static void testRouterInitEvaluatesOrderedMetadataPrefix(void)
 
         gRouterTargetInitCalls = 0;
         routerTunnelUpStreamInit(router, line);
+        require(lineGetMark(line) != NULL && memoryEqual(lineGetMark(line)->bytes, mark.bytes, kLineMarkSize),
+                "Router consumed or altered the mark during Init");
         router_lstate_t *ls = lineGetState(line, router);
         require(gRouterTargetInitCalls == (cases[ci].selected >= 0),
                 "ordered Router initialized a branch at the wrong phase");
@@ -1270,7 +1340,8 @@ static void testRouterInitEvaluatesOrderedMetadataPrefix(void)
 static void testRouterInitClearsDetectedProtocolsAndPreservesRouteControl(void)
 {
     line_t *line = testLineCreate();
-    line->routing_context.dest_ctx.optional_flags.detected_protocols =
+    addresscontextSetOnlyProtocol(lineGetDestinationAddressContext(line), IP_PROTO_TCP);
+    line->routing_context.dest_ctx.metadata_flags =
         kAddressContextProtocolHttp1 | kAddressContextProtocolBittorrent | kAddressContextRouteFlagPinnedDestination;
     addresscontextSetResolverDns(&line->routing_context.dest_ctx, true);
 
@@ -1287,8 +1358,7 @@ static void testRouterInitClearsDetectedProtocolsAndPreservesRouteControl(void)
     routerTunnelUpStreamInit(router, line);
 
     router_lstate_t *ls = lineGetState(line, router);
-    require(line->routing_context.dest_ctx.optional_flags.detected_protocols ==
-                kAddressContextRouteFlagPinnedDestination,
+    require(line->routing_context.dest_ctx.metadata_flags == kAddressContextRouteFlagPinnedDestination,
             "Router upstream Init did not preserve route-control metadata while clearing detected protocols");
     require(addresscontextIsResolverDns(&line->routing_context.dest_ctx),
             "Router sniffing Init erased resolver DNS origin");
@@ -1445,7 +1515,7 @@ static void testTlsSniffingAcrossRecords(void)
                     kRouterClassifyTarget,
                     target);
         requireDomain(&line->routing_context.dest_ctx, "fragment.example.test");
-        require((line->routing_context.dest_ctx.optional_flags.detected_protocols & kAddressContextProtocolTls) != 0,
+        require((line->routing_context.dest_ctx.metadata_flags & kAddressContextProtocolTls) != 0,
                 "fragmented TLS protocol was not detected");
         routerDestinationDomainDestroy(&rule);
         testLineDestroy(line);
@@ -1661,7 +1731,7 @@ static void testProtocolHttp1MatchesOnlyHttp1(void)
                 classifyOneRule(&ts, &rule, line, request, (uint32_t) sizeof(request) - 1U),
                 kRouterClassifyTarget,
                 target);
-    require((line->routing_context.dest_ctx.optional_flags.detected_protocols & kAddressContextProtocolHttp1) != 0,
+    require((line->routing_context.dest_ctx.metadata_flags & kAddressContextProtocolHttp1) != 0,
             "HTTP/1 protocol bit was not set");
 
     testLineDestroy(line);
@@ -1672,7 +1742,7 @@ static void testProtocolHttp1MatchesOnlyHttp1(void)
                 classifyOneRule(&ts, &rule, line, http2_preface, (uint32_t) sizeof(http2_preface) - 1U),
                 kRouterClassifyDefault,
                 NULL);
-    require((line->routing_context.dest_ctx.optional_flags.detected_protocols & kAddressContextProtocolHttp1) == 0,
+    require((line->routing_context.dest_ctx.metadata_flags & kAddressContextProtocolHttp1) == 0,
             "HTTP/2 preface set the HTTP/1 protocol bit");
 
     routerProtocolDestroy(&rule);
@@ -1695,7 +1765,7 @@ static void testProtocolBittorrentMatches(void)
                 classifyOneRule(&ts, &rule, line, payload, (uint32_t) sizeof(payload)),
                 kRouterClassifyTarget,
                 target);
-    require((line->routing_context.dest_ctx.optional_flags.detected_protocols & kAddressContextProtocolBittorrent) != 0,
+    require((line->routing_context.dest_ctx.metadata_flags & kAddressContextProtocolBittorrent) != 0,
             "BitTorrent protocol bit was not set");
 
     routerProtocolDestroy(&rule);
@@ -1715,7 +1785,7 @@ static void testProtocolBittorrentNeedMore(void)
                 classifyOneRule(&ts, &rule, line, partial, (uint32_t) sizeof(partial)),
                 kRouterClassifyNeedMore,
                 NULL);
-    require((line->routing_context.dest_ctx.optional_flags.detected_protocols & kAddressContextProtocolBittorrent) == 0,
+    require((line->routing_context.dest_ctx.metadata_flags & kAddressContextProtocolBittorrent) == 0,
             "partial BitTorrent prefix set the protocol bit too early");
 
     routerProtocolDestroy(&rule);
@@ -1735,7 +1805,7 @@ static void testProtocolNonMatchFallsThrough(void)
                 classifyOneRule(&ts, &rule, line, payload, (uint32_t) sizeof(payload) - 1U),
                 kRouterClassifyDefault,
                 NULL);
-    require((line->routing_context.dest_ctx.optional_flags.detected_protocols & kAddressContextProtocolBittorrent) == 0,
+    require((line->routing_context.dest_ctx.metadata_flags & kAddressContextProtocolBittorrent) == 0,
             "nonmatching payload set the BitTorrent protocol bit");
 
     routerProtocolDestroy(&rule);
@@ -1754,7 +1824,7 @@ static void testProtocolOrMatchesTls(void)
     uint32_t hello_len = makeClientHello(hello, "protocol.example.test");
     expectMatch(
         "protocol OR TLS route", classifyOneRule(&ts, &rule, line, hello, hello_len), kRouterClassifyTarget, target);
-    require((line->routing_context.dest_ctx.optional_flags.detected_protocols & kAddressContextProtocolTls) != 0,
+    require((line->routing_context.dest_ctx.metadata_flags & kAddressContextProtocolTls) != 0,
             "TLS protocol bit was not set");
 
     routerProtocolDestroy(&rule);
@@ -1993,7 +2063,7 @@ static void testHttpUpgradeAttributeMatches(void)
           .needs_http_upgrade_attribute = true,
     };
     router_lstate_t line_state;
-    routerLinestateInitialize(&line_state);
+    routerLinestateInitialize(&line_state, lineGetDestinationAddressContext(line));
 
     const uint8_t request[] = "GET /chat HTTP/1.1\r\n"
                               "Host: upgrade.example.test\r\n"
@@ -2025,7 +2095,7 @@ static void testHttpUpgradeAttributeMissingDoesNotMatch(void)
           .needs_http_upgrade_attribute = true,
     };
     router_lstate_t line_state;
-    routerLinestateInitialize(&line_state);
+    routerLinestateInitialize(&line_state, lineGetDestinationAddressContext(line));
 
     const uint8_t request[] = "GET /plain HTTP/1.1\r\n"
                               "Host: plain.example.test\r\n"
@@ -2056,7 +2126,7 @@ static void testHttpUpgradeAttributeSniffsWhenDestinationDomainExists(void)
           .needs_http_upgrade_attribute = true,
     };
     router_lstate_t line_state;
-    routerLinestateInitialize(&line_state);
+    routerLinestateInitialize(&line_state, lineGetDestinationAddressContext(line));
 
     const uint8_t request[] = "GET /socket HTTP/1.1\r\n"
                               "Host: new.example.test\r\n"
@@ -2088,7 +2158,7 @@ static void testHttpUpgradeAttributeNeedMore(void)
           .needs_http_upgrade_attribute = true,
     };
     router_lstate_t line_state;
-    routerLinestateInitialize(&line_state);
+    routerLinestateInitialize(&line_state, lineGetDestinationAddressContext(line));
 
     const uint8_t partial[] = "GET /socket HTTP/1.1\r\nUpgrade";
     expectMatch("partial http upgrade attribute route",
@@ -2151,6 +2221,7 @@ int main(void)
     testResolverDnsMetadataLifetime();
     testRouterInitMatchesResolverDns();
     testResolverDnsKeepsProtocolSniffing();
+    testLineMarkCondition();
     testRouterInitEvaluatesOrderedMetadataPrefix();
     testRouterInitClearsDetectedProtocolsAndPreservesRouteControl();
     testRouterInitCommitsStaticRoute();

@@ -1,5 +1,31 @@
 # Explicit integration registrations; preserve namespace and family variants.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING AND INCLUDE_SOCKS_5_SERVER
+   AND INCLUDE_TCP_UDP_LISTENER AND INCLUDE_UDP_CONNECTOR AND INCLUDE_ROUTER AND INCLUDE_BLACKHOLE)
+  add_waterwall_isolated_test(waterwall.l4_payload_socks_udp_ingress
+    "${PYTHON3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/l4_payload_topology_test.py"
+    "$<TARGET_FILE:${WATERWALL_TEST_TARGET}>" socks-udp-ingress)
+  set_tests_properties(waterwall.l4_payload_socks_udp_ingress PROPERTIES TIMEOUT 90)
+  add_waterwall_test_labels(waterwall.l4_payload_socks_udp_ingress "integration" "tunnels" "configuration" "socks")
+endif()
 add_waterwall_integration_test(waterwall.socks5_noauth_tcp_loopback socks5_noauth_tcp_loopback)
+if(TARGET Socks5Client AND TARGET Socks5Server AND
+   TARGET TcpListener AND TARGET TcpConnector AND TARGET TesterClient AND TARGET TesterServer)
+  if(TARGET TrojanClient AND TARGET TrojanServer)
+    add_waterwall_integration_test(waterwall.socks5_local_trojan_tcp_loopback socks5_local_trojan_tcp_loopback)
+  endif()
+  foreach(protocol IN ITEMS Vless Vmess)
+    if(TARGET ${protocol}Client AND TARGET ${protocol}Server)
+      string(TOLOWER "${protocol}" protocol_lower)
+      set(local_case "waterwall.socks5_local_${protocol_lower}_tcp_loopback")
+      add_waterwall_isolated_test(${local_case}
+        "${PYTHON3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/socks5_local_stream_integration.py"
+        "$<TARGET_FILE:${WATERWALL_TEST_TARGET}>" "${protocol}")
+      set_tests_properties(${local_case} PROPERTIES TIMEOUT 120)
+      add_waterwall_test_labels(${local_case} "integration" "tunnels" "socks")
+      add_waterwall_case_resource_lock(${local_case} socks5_local_trojan_tcp_loopback)
+    endif()
+  endforeach()
+endif()
 add_waterwall_probe_integration_test(waterwall.socks5_connect_large_body_probe socks5_connect_large_body_probe 30)
 add_waterwall_probe_integration_test(waterwall.socks5_client_large_reply_probe socks5_client_large_reply_probe 30)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING AND
@@ -79,22 +105,27 @@ add_waterwall_test_labels(waterwall.dns_slow_answer "integration" "tunnels" "soc
 add_waterwall_case_resource_lock(waterwall.dns_slow_answer dns_slow_answer)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING AND
    TARGET DomainResolver AND TARGET TcpUdpConnector AND TARGET Socks5Server AND TARGET Router)
-  set(dns_behaviour_config_consumers "")
-  foreach(consumer IN ITEMS TcpConnector UdpConnector TcpUdpConnector Router Socks5Client
-      TrojanClient VlessClient VmessClient HttpProxyClient ConnectionToPackets UdpStatelessSocket)
-    if(TARGET ${consumer})
-      list(APPEND dns_behaviour_config_consumers ${consumer})
+  if(INCLUDE_TCP_LISTENER AND INCLUDE_TCPCONNECTOR AND INCLUDE_TCP_UDP_CONNECTOR AND INCLUDE_BLACKHOLE)
+    set(dns_behaviour_config_consumers TcpConnector TcpUdpConnector Router)
+    if(INCLUDE_UDP_LISTENER AND INCLUDE_UDP_CONNECTOR)
+      list(APPEND dns_behaviour_config_consumers UdpConnector)
     endif()
-  endforeach()
-  add_waterwall_isolated_test(waterwall.domainresolver_configuration
-    "${PYTHON3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/domainresolver_configuration_test.py"
-    "$<TARGET_FILE:${WATERWALL_TEST_TARGET}>" ${dns_behaviour_config_consumers})
-  # The full configuration matrix launches hundreds of processes. Allow cumulative
-  # packed startup cost under CI load; each case keeps its 8-second deadlines.
-  set_tests_properties(waterwall.domainresolver_configuration PROPERTIES TIMEOUT 600)
-  add_waterwall_test_labels(waterwall.domainresolver_configuration "integration" "tunnels" "dns")
-  add_waterwall_case_resource_lock(waterwall.domainresolver_configuration domainresolver_transport)
-  foreach(mode IN ITEMS omitted native direct direct6 chain chain-sniff chain-default shared shared-explicit shared-vless vless isolation rejected pinned vless-pinned http-pinned http-pinned-resolve ctp-pinned)
+    foreach(consumer IN ITEMS Socks5Client TrojanClient VlessClient VmessClient HttpProxyClient
+        ConnectionToPackets UdpStatelessSocket)
+      if(TARGET ${consumer})
+        list(APPEND dns_behaviour_config_consumers ${consumer})
+      endif()
+    endforeach()
+    add_waterwall_isolated_test(waterwall.domainresolver_configuration
+      "${PYTHON3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/domainresolver_configuration_test.py"
+      "$<TARGET_FILE:${WATERWALL_TEST_TARGET}>" ${dns_behaviour_config_consumers})
+    # The full configuration matrix launches hundreds of processes. Allow cumulative
+    # packed startup cost under CI load; each case keeps its 8-second deadlines.
+    set_tests_properties(waterwall.domainresolver_configuration PROPERTIES TIMEOUT 600)
+    add_waterwall_test_labels(waterwall.domainresolver_configuration "integration" "tunnels" "dns")
+    add_waterwall_case_resource_lock(waterwall.domainresolver_configuration domainresolver_transport)
+  endif()
+  foreach(mode IN ITEMS omitted native direct direct6 chain chain-sniff chain-default shared shared-explicit shared-vless router-payload-first vless isolation rejected pinned vless-pinned http-pinned http-pinned-resolve ctp-pinned)
     if(mode MATCHES "vless" AND NOT (TARGET VlessClient AND TARGET VlessServer AND TARGET TlsClient AND TARGET TlsServer))
       continue()
     endif()

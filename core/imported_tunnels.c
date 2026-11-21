@@ -1,5 +1,6 @@
 #include "imported_tunnels.h"
 #include "loggers/core_logger.h"
+#include "node_builder/input_hints.h"
 #include "wwapi.h"
 
 #if defined(__MINGW32__) && defined(__GNUC__) && ! defined(__clang__)
@@ -64,6 +65,10 @@ static IMPORTED_TUNNEL_REGISTRATION_BOUNDARY void registerImportedTunnel(node_t 
 #include "PacketCounter/interface.h"
 #endif
 
+#ifdef INCLUDE_SYN_REPLY
+#include "SynReply/interface.h"
+#endif
+
 #ifdef INCLUDE_PACKET_TO_CONNECTION
 #include "PacketsToConnection/interface.h"
 #endif
@@ -84,8 +89,11 @@ static IMPORTED_TUNNEL_REGISTRATION_BOUNDARY void registerImportedTunnel(node_t 
 #include "StreamToPackets/interface.h"
 #endif
 
-#ifdef INCLUDE_WIREGUARD_DEVICE
-#include "WireGuardDevice/interface.h"
+#ifdef INCLUDE_WIREGUARD_CLIENT
+#include "WireGuardClient/interface.h"
+#endif
+#ifdef INCLUDE_WIREGUARD_SERVER
+#include "WireGuardServer/interface.h"
 #endif
 
 #ifdef INCLUDE_LAYER3_IP_ROUTING_TABLE
@@ -114,6 +122,14 @@ static IMPORTED_TUNNEL_REGISTRATION_BOUNDARY void registerImportedTunnel(node_t 
 
 #ifdef INCLUDE_PING_SERVER
 #include "PingServer/interface.h"
+#endif
+
+#ifdef INCLUDE_PING6_CLIENT
+#include "Ping6Client/interface.h"
+#endif
+
+#ifdef INCLUDE_PING6_SERVER
+#include "Ping6Server/interface.h"
 #endif
 
 #ifdef INCLUDE_KEEPALIVE_CLIENT
@@ -232,6 +248,22 @@ static IMPORTED_TUNNEL_REGISTRATION_BOUNDARY void registerImportedTunnel(node_t 
 #include "KcpServer/interface.h"
 #endif
 
+#ifdef INCLUDE_ENET_CLIENT
+#include "EnetClient/interface.h"
+#endif
+
+#ifdef INCLUDE_ENET_SERVER
+#include "EnetServer/interface.h"
+#endif
+
+#ifdef INCLUDE_GNS_CLIENT
+#include "GnsClient/interface.h"
+#endif
+
+#ifdef INCLUDE_GNS_SERVER
+#include "GnsServer/interface.h"
+#endif
+
 #ifdef INCLUDE_UDP_STATELESS_SOCKET
 #include "UdpStatelessSocket/interface.h"
 #endif
@@ -274,6 +306,14 @@ static IMPORTED_TUNNEL_REGISTRATION_BOUNDARY void registerImportedTunnel(node_t 
 
 #ifdef INCLUDE_HTTP_CLIENT
 #include "HttpClient/interface.h"
+#endif
+
+#ifdef INCLUDE_RTMP_CLIENT
+#include "RtmpClient/interface.h"
+#endif
+
+#ifdef INCLUDE_RTMP_SERVER
+#include "RtmpServer/interface.h"
 #endif
 
 #ifdef INCLUDE_SOCKS5_CLIENT
@@ -409,6 +449,9 @@ ww_startup_result_t loadImportedTunnelsIntoCore(void)
     ww_startup_context_t startup = {0};
     wwStartupContextBegin(&startup);
 
+    USING(HintConnectionIN);
+    USING(HintPacketIN);
+
 #if INCLUDE_TEMPLATE
     USING(Template);
 #endif
@@ -453,6 +496,10 @@ ww_startup_result_t loadImportedTunnelsIntoCore(void)
     USING(PacketCounter);
 #endif
 
+#ifdef INCLUDE_SYN_REPLY
+    USING(SynReply);
+#endif
+
 #ifdef INCLUDE_PACKET_TO_CONNECTION
     USING(PacketsToConnection);
 #endif
@@ -473,8 +520,11 @@ ww_startup_result_t loadImportedTunnelsIntoCore(void)
     USING(StreamToPackets);
 #endif
 
-#ifdef INCLUDE_WIREGUARD_DEVICE
-    USING(WireGuardDevice);
+#ifdef INCLUDE_WIREGUARD_CLIENT
+    USING(WireGuardClient);
+#endif
+#ifdef INCLUDE_WIREGUARD_SERVER
+    USING(WireGuardServer);
 #endif
 
 #ifdef INCLUDE_LAYER3_IP_ROUTING_TABLE
@@ -503,6 +553,14 @@ ww_startup_result_t loadImportedTunnelsIntoCore(void)
 
 #ifdef INCLUDE_PING_SERVER
     USING(PingServer);
+#endif
+
+#ifdef INCLUDE_PING6_CLIENT
+    USING(Ping6Client);
+#endif
+
+#ifdef INCLUDE_PING6_SERVER
+    USING(Ping6Server);
 #endif
 
 #ifdef INCLUDE_KEEPALIVE_CLIENT
@@ -621,6 +679,22 @@ ww_startup_result_t loadImportedTunnelsIntoCore(void)
     USING(KcpServer);
 #endif
 
+#ifdef INCLUDE_ENET_CLIENT
+    USING(EnetClient);
+#endif
+
+#ifdef INCLUDE_ENET_SERVER
+    USING(EnetServer);
+#endif
+
+#ifdef INCLUDE_GNS_CLIENT
+    USING(GnsClient);
+#endif
+
+#ifdef INCLUDE_GNS_SERVER
+    USING(GnsServer);
+#endif
+
 #ifdef INCLUDE_UDP_STATELESS_SOCKET
     USING(UdpStatelessSocket);
 #endif
@@ -663,6 +737,14 @@ ww_startup_result_t loadImportedTunnelsIntoCore(void)
 
 #ifdef INCLUDE_HTTP_CLIENT
     USING(HttpClient);
+#endif
+
+#ifdef INCLUDE_RTMP_CLIENT
+    USING(RtmpClient);
+#endif
+
+#ifdef INCLUDE_RTMP_SERVER
+    USING(RtmpServer);
 #endif
 
 #ifdef INCLUDE_SOCKS5_CLIENT

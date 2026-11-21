@@ -2,14 +2,14 @@
 
 #include "DomainResolver/interface.h"
 #include "DomainResolver/transport.h"
-#include "loggers/log_rate_limiter.h"
 #include "wwapi.h"
 
 typedef enum domainresolver_phase_e
 {
     kDomainResolverPhaseIdle = 0,
     kDomainResolverPhaseResolving,
-    kDomainResolverPhaseOpen
+    kDomainResolverPhaseOpen,
+    kDomainResolverPhaseClosing,
 } domainresolver_phase_t;
 
 typedef enum domainresolver_mode_e
@@ -74,6 +74,7 @@ typedef struct domainresolver_lstate_s
     buffer_queue_t         pending;
     bool                   init_dispatching;
     bool                   draining;
+    bool                   drain_on_finish; // Framing on the application side, captured after destination preparation.
     bool                   pending_source_hold; // Local DNS/order wait; never stored as received permission.
     bool                   next_paused;
     bool                   prev_paused;

@@ -38,7 +38,7 @@ static void requireTcpPort(const address_context_t *ctx, uint16_t port)
 
 static void requireOptionalProtocols(const address_context_t *ctx, uint32_t expected, const char *message)
 {
-    require(ctx->optional_flags.detected_protocols == expected, message);
+    require(ctx->metadata_flags == expected, message);
 }
 
 static ip_addr_t testIpv4Address(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
@@ -111,7 +111,7 @@ static void testDynamicDomainCopyKeepsMetadata(void)
     addresscontextSetPort(&source, 443);
     addresscontextSetOnlyProtocol(&source, IP_PROTO_TCP);
     addresscontextSetDomainStrategy(&source, kDsPreferIpV6);
-    source.optional_flags.detected_protocols = kAddressContextProtocolBittorrent;
+    source.metadata_flags = kAddressContextProtocolBittorrent;
 
     addresscontextAddrCopy(&copy, &source);
 
@@ -136,7 +136,7 @@ static void testConstantDomainCopyKeepsMetadata(void)
     addresscontextDomainSetConstMem(&source, domain, (uint8_t) stringLength(domain));
     addresscontextSetPort(&source, 8443);
     addresscontextSetOnlyProtocol(&source, IP_PROTO_TCP);
-    source.optional_flags.detected_protocols = kAddressContextProtocolTls;
+    source.metadata_flags = kAddressContextProtocolTls;
 
     addresscontextAddrCopy(&copy, &source);
 
@@ -161,7 +161,7 @@ static void testIpCopyKeepsMetadata(void)
     ip.u_addr.ip4.addr = PP_HTONL(LWIP_MAKEU32(127, 0, 0, 1));
     addresscontextSetIpPort(&source, &ip, 8080);
     addresscontextSetOnlyProtocol(&source, IP_PROTO_TCP);
-    source.optional_flags.detected_protocols = kAddressContextProtocolHttp1;
+    source.metadata_flags = kAddressContextProtocolHttp1;
 
     addresscontextAddrCopy(&copy, &source);
 
@@ -179,7 +179,7 @@ static void testResetClearsOptionalFlags(void)
 {
     address_context_t ctx = {0};
 
-    ctx.optional_flags.detected_protocols = kAddressContextProtocolHttp1 | kAddressContextProtocolTls;
+    ctx.metadata_flags = kAddressContextProtocolHttp1 | kAddressContextProtocolTls;
     addresscontextReset(&ctx);
 
     requireOptionalProtocols(&ctx, 0, "reset did not clear optional protocols");
@@ -189,11 +189,10 @@ static void testClearDetectedProtocolsPreservesRouteControl(void)
 {
     address_context_t ctx = {0};
 
-    ctx.optional_flags.detected_protocols =
-        kAddressContextDetectedProtocolMask | kAddressContextRouteFlagPinnedDestination;
+    ctx.metadata_flags = kAddressContextDetectedProtocolMask | kAddressContextRouteControlMask;
     addresscontextClearDetectedProtocols(&ctx);
-    requireOptionalProtocols(
-        &ctx, kAddressContextRouteFlagPinnedDestination, "detected-protocol reset erased negotiated route control");
+    requireOptionalProtocols(&ctx, kAddressContextRouteControlMask, "sniff reset erased route control");
+    addresscontextSetTransportOffer(&ctx, kAddressContextTransportTcp);
     require(addresscontextDestinationIsPinned(&ctx), "pinned destination marker was not preserved");
 
     addresscontextClearOptionalFlags(&ctx);
@@ -206,11 +205,11 @@ static void testEndpointSettersClearOptionalFlags(void)
     address_context_t ctx = {0};
     ip_addr_t         ip  = testIpv4Address(192, 0, 2, 1);
 
-    ctx.optional_flags.detected_protocols = kAddressContextProtocolTls;
+    ctx.metadata_flags = kAddressContextProtocolTls;
     addresscontextDomainSetByString(&ctx, "example.org");
     requireOptionalProtocols(&ctx, 0, "domain setter did not clear optional protocols");
 
-    ctx.optional_flags.detected_protocols = kAddressContextProtocolBittorrent;
+    ctx.metadata_flags = kAddressContextProtocolBittorrent;
     addresscontextSetIpPortProtocol(&ctx, &ip, 443, IP_PROTO_TCP);
     requireOptionalProtocols(&ctx, 0, "IP setter did not clear optional protocols");
 
@@ -223,7 +222,7 @@ static void testObservedDomainPreservesOptionalFlags(void)
     ip_addr_t         ip  = testIpv4Address(192, 0, 2, 2);
 
     addresscontextSetIpPortProtocol(&ctx, &ip, 443, IP_PROTO_TCP);
-    ctx.optional_flags.detected_protocols = kAddressContextProtocolHttp1;
+    ctx.metadata_flags = kAddressContextProtocolHttp1;
 
     const uint8_t observed[] = "observed.example";
     require(addresscontextSetObservedDomain(&ctx, observed, (uint32_t) sizeof(observed) - 1U),
@@ -252,6 +251,38 @@ static void testResolvedDomainConvertsToSockAddr(void)
     addresscontextReset(&ctx);
 }
 
+static void testTransportOffer(void)
+{
+    address_context_t ctx = {0};
+    addresscontextDomainSetByString(&ctx, "example.org");
+    addresscontextSetPort(&ctx, 443);
+    addresscontextSetResolverDns(&ctx, true);
+    require(addresscontextGetTransportOffer(&ctx) == 0, "an unset transport produced an offer");
+
+    addresscontextSetTransportOffer(&ctx, kAddressContextTransportBoth);
+    require(addresscontextGetTransportOffer(&ctx) == kAddressContextTransportBoth, "flexible offer was lost");
+    require(addresscontextClassifyTransport(&ctx) == kAddressContextTransportUnsupported,
+            "the exact classifier accepted a dual source observation");
+    require(addresscontextSelectTransport(&ctx, kAddressContextTransportBoth) == kAddressContextTransportTcp,
+            "a flexible selector did not prefer TCP");
+    require(addresscontextSelectTransport(&ctx, kAddressContextTransportUdp) == kAddressContextTransportUdp,
+            "a UDP-only selector did not select UDP");
+    require(addresscontextGetTransportOffer(&ctx) == kAddressContextTransportBoth, "selection narrowed the live offer");
+    addresscontextSetProtocol(&ctx, IP_PROTO_ICMP);
+    require(addresscontextGetTransportOffer(&ctx) == 0, "mixed ICMP and L4 flags formed a transport offer");
+    addresscontextSetTransportOffer(&ctx, kAddressContextTransportBoth);
+    addresscontextSetDestinationPinned(&ctx, true);
+    require(addresscontextGetTransportOffer(&ctx) == 0, "a dual pin formed a transport offer");
+    addresscontextSetTransportOffer(&ctx, kAddressContextTransportUdp);
+    require(addresscontextSelectTransport(&ctx, kAddressContextTransportTcp) == 0, "a TCP selector accepted UDP");
+    require(addresscontextSelectTransport(&ctx, kAddressContextTransportBoth) == kAddressContextTransportUdp,
+            "the valid UDP pin did not survive selection");
+    require(addresscontextDestinationIsPinned(&ctx) && addresscontextIsResolverDns(&ctx) && ctx.port == 443,
+            "publishing a transport lost independent endpoint metadata");
+    requireDomainEquals(&ctx, "example.org");
+    addresscontextReset(&ctx);
+}
+
 int main(void)
 {
     testCaseSet("address_context_test");
@@ -265,5 +296,6 @@ int main(void)
     testEndpointSettersClearOptionalFlags();
     testObservedDomainPreservesOptionalFlags();
     testResolvedDomainConvertsToSockAddr();
+    testTransportOffer();
     return 0;
 }

@@ -1,8 +1,7 @@
 # AGENTS.md — WaterWall
 
-Policy for AI agents and contributors to **WaterWall**, a modular chain-based C
-tunneling runtime. Contracts/examples:
-`WaterWall-Docs/docs/05-devguides/`. Keep this kernel below 16 KiB.
+Policy for WaterWall, a modular chain-based C tunneling runtime. Keep below 16 KiB.
+See `WaterWall-Docs/docs/05-devguides/` for contracts and examples.
 
 ## 1. Task Authority, Scope, And Evidence
 
@@ -24,58 +23,53 @@ tunneling runtime. Contracts/examples:
 - Preserve unrelated dirty-worktree changes; never discard, overwrite, or reformat
   them.
 
-### Where the tunnel contracts apply
+### Tunnel contract scope
 
-Domain contracts apply to `ww/net/`, `tunnels/`, and their callers. Unrelated docs,
-builds, packaging, scripts, and tooling use only relevant repository-wide rules.
-Preserve every **applicable** invariant without forcing irrelevant tunnel analysis.
+Tunnel contracts cover `ww/net/`, `tunnels/`, and their callers. Unrelated docs,
+builds, packaging, scripts, and tooling use relevant repository-wide rules.
 
 ### Durable project knowledge
 
-The Developer Guide is durable memory, not task history. Update its canonical
-section for in-scope contract changes or confirmed reusable knowledge whose
-omission would mislead; docs do not authorize redesign.
+In the same implementation task, update the canonical guide section for in-scope
+contract changes or confirmed reusable knowledge whose omission would mislead.
+Check `git -C WaterWall-Docs status --short` before finishing such work.
+Read-only tasks propose edits. Implementers may report unrelated findings.
 
-Never record speculation, pending ideas, review history, artifacts, or one-off
-details as contracts or promote patterns without confirming intent. Report
-conflicting or unclear evidence.
+Keep speculation, pending ideas, review history, artifacts, and one-offs out of
+contracts. Confirm intent before promoting patterns. Report unclear or conflicting
+evidence. Version labels, migration notes, and backward-compatibility commentary
+require an explicit maintainer request.
 
-Add version labels (`v2`, `v3`, etc.), migration notes, or backward-compatibility
-commentary only on explicit maintainer request, not merely because a project
-structure, node, or wire format changes.
-
-Read-only tasks only propose doc edits. Implementation may sync related guide text
-and report unrelated findings. Change `AGENTS.md` only when authorized work changes
-always-on policy, a catastrophic guardrail, or routing, using a short rule/link;
-otherwise the guide is enough. Explicit contract/lifecycle redesign updates code,
-callers, guide text, and tests.
+Docs cannot authorize redesign. Explicit contract/lifecycle redesign updates code,
+callers, guide, and tests. Limit `AGENTS.md` edits to short rules or links for
+authorized changes to always-on policy, catastrophic guardrails, or routing.
 
 ## 2. Repository Map And Mandatory Reading
 
-Core paths: `ww/net/` owns networking, `ww/bufio/` buffers, `tunnels/`
-implementations, and `tests/` native/integration coverage. `CMakePresets.json` and
-`ww/cmake/preset/` define supported builds. Developer contracts live in
-`WaterWall-Docs/docs/05-devguides/`; node settings in
-`WaterWall-Docs/docs/02-noderefs/`.
+Before substantive work (reviews included), reuse the `WaterWall-Docs/` checkout with local edits intact.
+If absent, run `git clone https://github.com/radkesvat/WaterWall-Docs.git WaterWall-Docs`
+from the WaterWall root. On failure, name the unavailable required contracts.
 
-Before substantive work, read every routing-table source matching the scope;
-the guide's `must` and `never` statements join this policy. Read newly applicable
-sources before continuing when scope expands.
+`ww/net/`, `ww/bufio/`, and `tunnels/` hold networking, buffers, and nodes.
+`tests/` holds native/integration tests. Presets use `CMakePresets.json` and
+`ww/cmake/preset/`. Node settings use `WaterWall-Docs/docs/02-noderefs/`.
+
+Read applicable [reference contracts](WaterWall-Docs/docs/05-devguides/reference/).
+Guide `must`/`never` rules apply.
 
 | Trigger | Required sources |
 | --- | --- |
-| Any behavioral work in `tunnels/`, `ww/net/`, or code invoking tunnel/line contracts | Target, immediate neighbors, `ww/net/tunnel.h`, `ww/net/line.h`, `ww/net/chain.c`, [Part 1](WaterWall-Docs/docs/05-devguides/doc1.mdx), and [Part 2](WaterWall-Docs/docs/05-devguides/part2-lines-and-callbacks.mdx) |
-| Worker identity/WID, worker-local storage, or cross-thread posting | [Part 1](WaterWall-Docs/docs/05-devguides/doc1.mdx), especially “Choosing a Worker-Context Helper,” plus the relevant worker/runtime implementation |
+| Behavior in `tunnels/`, `ww/net/`, or tunnel/line callers | Target, immediate neighbors, `ww/net/tunnel.h`, `ww/net/line.h`, `ww/net/chain.c`, [Part 1](WaterWall-Docs/docs/05-devguides/doc1.mdx), and [Part 2](WaterWall-Docs/docs/05-devguides/part2-lines-and-callbacks.mdx) |
+| Worker identity/WID, worker-local storage, or cross-thread posting | [Part 1](WaterWall-Docs/docs/05-devguides/doc1.mdx), “Choosing a Worker-Context Helper,” and the worker/runtime implementation |
+| Shared atomics, compare/exchange, publication flags, or cross-thread counters | [watomic.h](ww/libc/watomic.h) and [Shared atomic state](WaterWall-Docs/docs/05-devguides/doc1.mdx#shared-atomic-state). For fields shared with external nodes, see [External-node ABI](WaterWall-Docs/docs/05-devguides/part5-tunnel-anatomy.mdx#external-node-abi). |
 | Framing, prepend, padding, buffer pools, or buffer ownership | `ww/bufio/shiftbuffer.h`, `ww/bufio/buffer_pool.h`, relevant `node.c`, and [Part 3](WaterWall-Docs/docs/05-devguides/part3-buffers-and-padding.mdx) |
 | Layer-3 nodes, packet lines, or packet/stream bridges | `ww/net/packet_tunnel.{h,c}` and [Part 4](WaterWall-Docs/docs/05-devguides/part4-packet-tunnels.mdx) |
 | New/structurally changed tunnel, constructor, node metadata, or HTTP tunnel | [Part 5](WaterWall-Docs/docs/05-devguides/part5-tunnel-anatomy.mdx) |
 | Build, formatting, tests, code review, benchmark, or validation infrastructure | [Part 6](WaterWall-Docs/docs/05-devguides/part6-build-test-review.mdx) |
 | Shutdown, signals, lifecycle-v2, worker messages, quiescence/drain, or external callback roots | [Part 7](WaterWall-Docs/docs/05-devguides/part7-shutdown-and-signals.mdx) and relevant core implementation |
 
-Documentation-only and unrelated tooling work need not load networking contracts
-unless describing or exercising them. For new or structurally changed tunnels,
-compare multiple mature implementations when practical; Part 1 lists examples.
-Existing patterns remain evidence, not proof.
+Docs and unrelated tooling read networking contracts when describing or exercising them.
+For new or restructured tunnels, compare mature examples from Part 1 when practical.
 
 ## 3. Always-On WaterWall Safety Kernel
 
@@ -127,6 +121,9 @@ These guardrails do not replace the mandatory guide reading:
 14. Memory-manager OOM is fatal; never add recovery or orderly shutdown.
     Preserve geometry, budget, fixed-resource and I/O refusals. See
     [Part 5](WaterWall-Docs/docs/05-devguides/part5-tunnel-anatomy.mdx#heap-allocation-failure).
+15. [Send startup bytes](WaterWall-Docs/docs/05-devguides/part2-lines-and-callbacks.mdx#startup-without-est)
+    after live next `Init` as flow control permits. Justify each `Est` gate and
+    verify the event can arrive without the held bytes.
 
 ## 4. Implementation Workflow
 
@@ -182,14 +179,8 @@ These guardrails do not replace the mandatory guide reading:
 
 ## 6. Build, Format, Test, And Validate
 
-Part 6 defines commands, lanes and timings. Use CMake presets and project scripts,
-not hand-built compiler commands. Prefer the `linux` production tree; never mix
-it with `linux-gcc-x64` in one validation flow.
-
-```bash
-cmake --preset linux
-cmake --build --preset linux -j8
-```
+Use CMake presets and project scripts. Prefer the `linux` production tree and
+keep it separate from `linux-gcc-x64`. Part 6 documents targets and lanes.
 
 ### Required C formatting
 
@@ -208,21 +199,21 @@ clang-format --dry-run -Werror --style=file path/to/changed_file.c
 
 ### Validation policy
 
-- Start with the smallest direct check. Expand to the functional lane for shared
-  tunnel/network behavior and to routine production lanes plus native units for
-  shared-core, lifecycle/concurrency, multi-subsystem, or uncertain-scope changes.
-- Speed and stress lanes are opt-in; run them when requested or directly validating
-  their workloads. Run source-only policy checks once across configurations for
-  the same source revision. See Part 6 for lane selection.
-- When native Linux units are relevant, normally exercise the focused coverage in
-  both `linux-unit-debug` and `linux-unit-release`. Prefer Debug first during
-  behavioral iteration because assertions and guardrails are active, but never use
-  it as a substitute for optimized `NDEBUG` Release behavior. Broad/shared changes
-  run the complete unit suite in both configurations.
-- Documentation and clearly non-behavioral changes may need only inspection or
-  relevant link/policy checks. Tests are expected for new observable behavior,
-  meaningful edge cases, changed contracts, and reproducible bugs likely to regress;
-  do not manufacture tests when existing coverage already proves the result.
+- Run all focused tests that exercise the changed behavior, affected callers
+  and relevant failure paths. The change determines how many tests to select.
+  Stop once that coverage passes. For prose, inspect the diff and verify
+  changed links or command examples.
+- Add focused regression coverage for new behavior, changed contracts and
+  meaningful edge cases when existing tests leave them uncovered.
+- For native units, select the relevant CTest cases together. The runner builds
+  their targets. Use Debug for assertions and Release for optimized or `NDEBUG`
+  paths. Exercise both when the change affects both paths.
+- Leave routine full suites to CI. Run a whole lane or unit suite locally only on
+  explicit request or when a concrete risk spans its cases and a focused selection
+  cannot cover it. For shared code, trace affected callers to select those cases.
+  See [Part 6](WaterWall-Docs/docs/05-devguides/part6-build-test-review.mdx#choosing-validation-and-regression-coverage).
+- Speed and stress lanes are opt-in for their workloads. Run relevant source-only
+  policy checks once per source revision.
 - Deterministic integration cases use the namespace harness and loopback only, never
   public DNS or host-network port availability.
 - For syntax diagnostics, reuse `build/linux/compile_commands.json`; syntax-only
@@ -257,6 +248,5 @@ does not limit ordinary product review or an explicitly requested infrastructure
 - Prefer existing tests and small fixtures. If new evidence machinery materially
   exceeds the product change or adds a framework, stop unless explicitly authorized.
   Keep bulky generated artifacts outside source history unless requested.
-- Once correctness checks pass and the terminal candidate disposition is recorded,
-  run broad validation once on the final retained production set and stop reviewing
+- Apply §6 to the final retained production changes once, then stop reviewing
   incidental acceptance machinery.

@@ -267,6 +267,11 @@ static void childInit(tunnel_t *t, line_t *l)
     require(lineGetRoutingContext(l)->local_listener_port == 8080, "listener metadata");
     require(lineGetRoutingContext(l)->peer_source_port == 54321, "peer metadata");
     require(lineGetSourceAddressContext(l)->proto_tcp, "source protocol");
+    const address_context_t *destination = lineGetDestinationAddressContext(l);
+    require(addresscontextGetTransportOffer(destination) == kAddressContextTransportTcp, "child TCP transport");
+    if (s->phase == kHpsFallback)
+        require(! addresscontextIsValid(destination) && ! addresscontextHasPort(destination),
+                "fallback child endpoint");
     require(ip_addr_cmp(&lineGetSourceAddressContext(l)->ip_address, &lineGetSourceAddressContext(client)->ip_address),
             "source IP");
     if (close_on == 1)
@@ -396,6 +401,7 @@ static void resetClient(tunnel_chain_t *chain)
     lineGetRoutingContext(client)->peer_source_port    = 54321;
     require(addresscontextSetIpAddress(lineGetSourceAddressContext(client), "127.0.0.2"), "source address");
     addresscontextSetOnlyProtocol(lineGetSourceAddressContext(client), IP_PROTO_TCP);
+    addresscontextSetOnlyProtocol(lineGetDestinationAddressContext(client), IP_PROTO_TCP);
     httpproxyserverTunnelUpStreamInit(proxy, client);
     require(! linePrefersOrdinaryReadUpstream(client) && ! linePrefersOrdinaryReadDownstream(client),
             "server chose read preferences before request selection");
@@ -465,18 +471,22 @@ static void inputAccumulatorCases(tunnel_chain_t *chain)
                         source_data[i] == (uint8_t) (0x20U + i),
                     "replacement append changed preserved/new byte order or deferred source contents");
 
-        const sbuf_t before         = *replacement;
-        const size_t refused_length = settings->max_pending - hpsPendingBytes(session) + 1;
-        dir->incoming               = bufferpoolGetBestFit(pool, refused_length, bufferpoolGetLargeBufferPadding(pool));
-        incoming                    = dir->incoming;
+        const sbuf_read_view_t before          = sbufGetResidentView(replacement);
+        const size_t           before_capacity = sbufGetTotalCapacity(replacement);
+        const uint16_t         before_headroom = sbufGetInitialHeadroom(replacement);
+        const uint16_t         before_flags    = replacement->flags;
+        const size_t           refused_length  = settings->max_pending - hpsPendingBytes(session) + 1;
+        dir->incoming = bufferpoolGetBestFit(pool, refused_length, bufferpoolGetLargeBufferPadding(pool));
+        incoming      = dir->incoming;
         sbufSetLength(incoming, refused_length);
         memorySet(sbufGetMutablePtr(incoming), 0x6e, refused_length);
         require(! hpsAppendInput(session, direction, sbufGetRawPtr(incoming), refused_length),
                 "accumulator accepted input beyond its logical pending budget");
-        require(dir->input == replacement && replacement->data == before.data && replacement->len == before.len &&
-                    replacement->capacity == before.capacity &&
-                    replacement->initial_headroom == before.initial_headroom && replacement->flags == before.flags &&
-                    memoryEqual(replacement->data, "fix!tail", 8) && dir->incoming == incoming &&
+        require(dir->input == replacement && sbufGetRawPtr(replacement) == before.data &&
+                    sbufGetLength(replacement) == before.length &&
+                    sbufGetTotalCapacity(replacement) == before_capacity &&
+                    sbufGetInitialHeadroom(replacement) == before_headroom && replacement->flags == before_flags &&
+                    memoryEqual(sbufGetRawPtr(replacement), "fix!tail", 8) && dir->incoming == incoming &&
                     sbufGetLength(incoming) == refused_length,
                 "pending-budget refusal replaced or consumed existing input/source storage");
         for (size_t i = 0; i < append_length; ++i)
@@ -516,16 +526,20 @@ static void inputAccumulatorCases(tunnel_chain_t *chain)
     sbuf_t *source             = up->deferred;
     sbufSetLength(source, append_length);
     memorySet(sbufGetMutablePtr(source), 0x3c, append_length);
-    sbuf_t      *original = up->input;
-    const sbuf_t before   = *original;
+    sbuf_t                *original        = up->input;
+    const sbuf_read_view_t before          = sbufGetResidentView(original);
+    const size_t           before_capacity = sbufGetTotalCapacity(original);
+    const uint16_t         before_headroom = sbufGetInitialHeadroom(original);
+    const uint16_t         before_flags    = original->flags;
     require(append_length <= settings->max_pending - hpsPendingBytes(session) &&
                 append_length > sbufGetTailroom(original),
             "allocation-refusal setup did not require replacement within its logical budget");
     require(! hpsAppendInput(session, kHpsUpstream, sbufGetRawPtr(source), append_length),
             "accumulator accepted replacement beyond the allocation-charge budget");
-    require(up->input == original && original->data == before.data && original->len == before.len &&
-                original->capacity == before.capacity && original->initial_headroom == before.initial_headroom &&
-                original->flags == before.flags && memoryEqual(original->data, "old", 3) && up->deferred == source &&
+    require(up->input == original && sbufGetRawPtr(original) == before.data &&
+                sbufGetLength(original) == before.length && sbufGetTotalCapacity(original) == before_capacity &&
+                sbufGetInitialHeadroom(original) == before_headroom && original->flags == before_flags &&
+                memoryEqual(sbufGetRawPtr(original), "old", 3) && up->deferred == source &&
                 sbufGetLength(source) == append_length && hpsPendingBytes(session) == 6,
             "allocation-charge refusal changed accumulated input or distinct source ownership");
     for (size_t i = 0; i < append_length; ++i)
@@ -546,6 +560,100 @@ static void childEof(void)
     httpproxyserverTunnelDownStreamFinish(proxy, l);
     require(! lineIsAlive(l), "EOF left owned child alive");
     lineUnref(l);
+}
+
+static void connectChildInit(tunnel_t *t, line_t *l)
+{
+    childInit(t, l);
+    sendBytes(l, true, "banner");
+    require(! client_writes && ! request_writes, "CONNECT replied or relayed inside child Init");
+}
+
+static void refuseConnectChildInit(tunnel_t *t, line_t *l)
+{
+    connectChildInit(t, l);
+    childEof();
+}
+
+static void closeChildOnConnectSuccess(tunnel_t *t, line_t *l, sbuf_t *buf)
+{
+    previousPayload(t, l, buf);
+    require(child && client_writes == 1 && ! request_writes, "CONNECT handed off raw bytes before its success reply");
+    childEof();
+}
+
+static void connectAdmissionCases(tunnel_chain_t *chain)
+{
+    const char *request = "CONNECT a:443 HTTP/1.1\r\nHost: a\r\n\r\nearly";
+    const char *success = "HTTP/1.1 200 Connection Established\r\n\r\n";
+    next->fnInitU       = connectChildInit;
+    for (unsigned timing = 0; timing < 3; ++timing)
+    {
+        const bool synchronous_est = timing == 1;
+        resetClient(chain);
+        automatic_response  = false;
+        delay_establishment = ! synchronous_est;
+        sendBytes(client, false, request);
+        hps_session_t *s = ((hps_lstate_t *) lineGetState(client, proxy))->session;
+        require(lineIsAlive(client) && child && s && s->phase == kHpsRelay && s->final_committed &&
+                    s->child_established == synchronous_est && (s->connect_at == 0) == synchronous_est,
+                "CONNECT success was not independent of the child connection deadline");
+        require(! stringCompare(received, "HTTP/1.1 200 Connection Established\r\n\r\nbanner") &&
+                    ! stringCompare(sent, "early") && client_writes == 2 && request_writes == 1 &&
+                    establishments == (unsigned) synchronous_est,
+                "CONNECT success did not precede early raw relay or generated a transport Est");
+        if (timing == 2)
+        {
+            httpproxyserverTunnelDownStreamEst(proxy, child);
+            httpproxyserverTunnelDownStreamEst(proxy, child);
+            require(s->child_established && ! s->connect_at && establishments == 1 && client_writes == 2,
+                    "late child Est did not clear the deadline or repeated the CONNECT success");
+        }
+        childEof();
+        require(! lineIsAlive(client) && ! child && ! closes && client_writes == 2,
+                "CONNECT EOF after handoff emitted an HTTP reply or reflected child Finish");
+        lineUnref(client);
+    }
+    resetClient(chain);
+    automatic_response = false;
+    next->fnInitU      = refuseConnectChildInit;
+    sendBytes(client, false, request);
+    next->fnInitU = childInit;
+    require(! lineIsAlive(client) && ! child && ! closes && establishments == 1 && ! request_writes &&
+                client_writes == 1 && strstr(received, "502 Bad Gateway") && ! strstr(received, "200") &&
+                ! strstr(received, "banner"),
+            "child Finish during Init did not override synchronous transport Est and data");
+    lineUnref(client);
+
+    resetClient(chain);
+    automatic_response  = false;
+    delay_establishment = true;
+    prev->fnPayloadD    = closeChildOnConnectSuccess;
+    sendBytes(client, false, request);
+    prev->fnPayloadD = previousPayload;
+    require(! lineIsAlive(client) && ! child && ! closes && ! establishments && ! request_writes &&
+                client_writes == 1 && ! stringCompare(received, success),
+            "child EOF during CONNECT success handoff changed the reply or relayed the queued request");
+    lineUnref(client);
+
+    resetClient(chain);
+    automatic_response  = false;
+    delay_establishment = true;
+    httpproxyserverTunnelUpStreamPause(proxy, client);
+    sendBytes(client, false, request);
+    hps_session_t *s = ((hps_lstate_t *) lineGetState(client, proxy))->session;
+    require(lineIsAlive(client) && child && s && s->phase == kHpsConnect && ! s->final_committed &&
+                s->directions[kHpsDownstream].output && ! client_writes && ! request_writes,
+            "Pause did not retain an uncommitted CONNECT reply");
+    sendBytes(child, true, "banner");
+    childEof();
+    require(lineIsAlive(client) && ! child && ! client_writes && ! request_writes,
+            "paused child EOF escaped the response queue");
+    httpproxyserverTunnelUpStreamResume(proxy, client);
+    require(! lineIsAlive(client) && ! closes && ! establishments && ! request_writes && client_writes == 1 &&
+                strstr(received, "502 Bad Gateway") && ! strstr(received, "200") && ! strstr(received, "banner"),
+            "child EOF before CONNECT success handoff did not replace the queued reply with 502");
+    lineUnref(client);
 }
 
 static void fallbackInit(tunnel_t *t, line_t *l)
@@ -1262,7 +1370,7 @@ static void cachedTimeoutClock(tunnel_chain_t *chain, const char *get)
     wloop_t       *loop     = getWorkerLoop(0);
     hps_tstate_t  *ts       = tunnelGetState(proxy);
     const uint64_t start_ms = UINT64_C(5000000000); /* Exercise more than 32 bits. */
-    for (unsigned mode = 0; mode < 5; ++mode)
+    for (unsigned mode = 0; mode < 6; ++mode)
     {
         loop->cur_hrtime = start_ms * 1000 + 789;
         resetClient(chain);
@@ -1294,11 +1402,18 @@ static void cachedTimeoutClock(tunnel_chain_t *chain, const char *get)
                     "response header used a different clock");
             duration = ts->header_timeout;
         }
-        else if (mode == 4)
+        else if (mode >= 4)
         {
+            delay_establishment = mode == 5;
             sendBytes(client, false, "CONNECT a:443 HTTP/1.1\r\nHost: a:443\r\n\r\n");
-            require(child && s->child_established && establishments == 1 && client_writes == 1,
-                    "CONNECT did not establish before idle timeout");
+            require(child && s->final_committed && s->child_established == (mode == 4) &&
+                        establishments == (unsigned) (mode == 4) && client_writes == 1,
+                    "CONNECT success did not precede its deadline regardless of transport Est");
+            if (mode == 5)
+            {
+                require(s->connect_at == start_ms, "early CONNECT success removed the child connect deadline");
+                duration = ts->connect_timeout;
+            }
         }
         require(s->progress_at == start_ms, "payload or Est sampled a fresh clock");
         loop->cur_hrtime = (start_ms + duration - 1) * 1000 + 999;
@@ -1317,7 +1432,7 @@ static void cachedTimeoutClock(tunnel_chain_t *chain, const char *get)
         loop->cur_hrtime = (start_ms + duration) * 1000;
         s->timer->cb((wevent_t *) s->timer);
         require(! lineIsAlive(client) && ! child, "cached monotonic deadline did not expire");
-        require(mode == 4   ? client_writes == 1 && closes == 1
+        require(mode >= 4   ? client_writes == 1 && closes == 1
                 : mode == 3 ? ! received_len
                             : strstr(received, mode == 0 ? "408" : "504") != NULL,
                 "cached deadline changed HTTP timeout behavior");
@@ -1588,9 +1703,7 @@ static void spliceRelayCases(tunnel_chain_t *chain, unsigned mode)
                 sendBytes(child, true, "banner");
                 if (! raw_fallback)
                 {
-                    require(! sent_len && ! received_len, "CONNECT bytes escaped before Est");
-                    httpproxyserverTunnelDownStreamEst(proxy, child);
-                    require(! stringCompare(sent, "early") &&
+                    require(! establishments && ! stringCompare(sent, "early") &&
                                 ! stringCompare(received, "HTTP/1.1 200 Connection Established\r\n\r\nbanner"),
                             "CONNECT success barrier");
                 }
@@ -1817,6 +1930,7 @@ static void runSuite(uint32_t large_size, uint32_t splice_limit)
     readPreferenceCases(chain);
 
     const char *get = "GET http://127.0.0.1:80/a HTTP/1.1\r\nHost: ignored.test\r\n\r\n";
+    connectAdmissionCases(chain);
     cachedTimeoutClock(chain, get);
     const char *fix_case = getenv("HPS_FIX_CASE");
     if (! fix_case || ! stringCompare(fix_case, "R1"))
@@ -1906,13 +2020,15 @@ static void runSuite(uint32_t large_size, uint32_t splice_limit)
     lineUnref(client);
 
     resetClient(chain);
-    automatic_response = false;
+    automatic_response  = false;
+    delay_establishment = true;
     httpproxyserverTunnelUpStreamPause(proxy, client);
     sendBytes(client, false, "CONNECT 127.0.0.1:80 HTTP/1.1\r\nHost: a\r\n\r\nearly");
     sendBytes(child, true, "banner");
     require(client_writes == 0 && request_writes == 0, "paused CONNECT success or early data escaped");
     httpproxyserverTunnelUpStreamResume(proxy, client);
-    require(strstr(received, "200 Connection Established\r\n\r\nbanner") != NULL && request_writes == 1,
+    require(! establishments && strstr(received, "200 Connection Established\r\n\r\nbanner") != NULL &&
+                request_writes == 1,
             "CONNECT success/data ordering");
     clientClose();
     lineUnref(client);
@@ -1962,7 +2078,7 @@ static void runSuite(uint32_t large_size, uint32_t splice_limit)
     sendBytes(client, false, authenticated_get);
     require(lineIsAlive(client) && opens == 1, "loaded offline authentication rejected a new HTTP request");
     ats->authenticated = true;
-    ++ats->users_generation;
+    atomicIncU64(&ats->users_generation);
     sendBytes(client, false, authenticated_get);
     require(opens == 2 && closes == 1, "generation change reused old child");
     userSetEnabled(usersLookupByIdentifier(&users, 1001), false);

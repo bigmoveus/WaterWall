@@ -84,52 +84,7 @@
     add_dependencies(waterwall_unit_tests packet_affinity_test)
     add_waterwall_unit_test(waterwall.packet_affinity_unit packet_affinity_test "unit;net;packet;affinity;lifetime")
   endif()
-  add_library(missing_abi_node_library SHARED ${WATERWALL_UNIT_SOURCE_ROOT}/core/legacy_node_library.c)
-  target_compile_definitions(missing_abi_node_library PRIVATE FIXTURE_NODE_TYPE="MissingAbiFixture")
-  set_target_properties(missing_abi_node_library PROPERTIES PREFIX "")
-  add_library(mismatched_abi_node_library SHARED ${WATERWALL_UNIT_SOURCE_ROOT}/core/legacy_node_library.c)
-  target_compile_definitions(
-    mismatched_abi_node_library
-    PRIVATE FIXTURE_NODE_TYPE="MismatchedAbiFixture" FIXTURE_ABI_VERSION=8
-  )
-  set_target_properties(mismatched_abi_node_library PROPERTIES PREFIX "")
-  add_library(external_node_abi_v3_library SHARED ${WATERWALL_UNIT_SOURCE_ROOT}/core/lifecycle_v2_node_library.c)
-  set_target_properties(external_node_abi_v3_library PROPERTIES PREFIX "")
-  if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    foreach(node_fixture_target IN ITEMS
-        missing_abi_node_library
-        mismatched_abi_node_library
-        external_node_abi_v3_library)
-      # At -O0 the public headers emit otherwise-unused static helpers whose
-      # application-owned symbols cannot resolve inside a standalone fixture.
-      # Give the linker one section per helper so it can retain only the ABI
-      # surface these external-node fixtures actually export.
-      target_compile_options(${node_fixture_target} PRIVATE -ffunction-sections -fdata-sections)
-      target_link_options(${node_fixture_target} PRIVATE "LINKER:--gc-sections")
-    endforeach()
-  endif()
-  waterwall_add_native_executable(legacy_node_compatibility_test SUPPORT SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/core/legacy_node_compatibility_test.c)
-  target_link_libraries(legacy_node_compatibility_test PRIVATE ww_test_support)
-  target_compile_definitions(
-    legacy_node_compatibility_test
-    PRIVATE
-      MISSING_NODE_LIBRARY_PATH="$<TARGET_FILE:missing_abi_node_library>"
-      MISMATCHED_NODE_LIBRARY_PATH="$<TARGET_FILE:mismatched_abi_node_library>"
-      EXTERNAL_NODE_ABI_V3_LIBRARY_PATH="$<TARGET_FILE:external_node_abi_v3_library>"
-  )
-  target_link_libraries(legacy_node_compatibility_test PRIVATE ww)
-  add_dependencies(
-    legacy_node_compatibility_test
-    missing_abi_node_library
-    mismatched_abi_node_library
-    external_node_abi_v3_library
-  )
-  add_dependencies(waterwall_unit_tests legacy_node_compatibility_test)
-  add_waterwall_unit_test(
-    waterwall.external_node_abi_v3_unit
-    legacy_node_compatibility_test
-    "unit;net;tunnels;node-manager;abi;external-node-v3;portable"
-  )
+  include("${CMAKE_SOURCE_DIR}/tests/unittests/external_node_abi.cmake")
 
   waterwall_add_native_executable(users_runtime_migration_test SUPPORT SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/core/users_runtime_migration_test.c
     ${CMAKE_SOURCE_DIR}/ww/objects/user.c)
@@ -649,7 +604,7 @@
 
     waterwall_add_native_executable(wloop_stop_request_test SUPPORT SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/net/event/wloop_stop_request_test.c)
   target_link_libraries(wloop_stop_request_test PRIVATE ww_test_support)
-    target_link_options(wloop_stop_request_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=wloopInvokeWriteCallback")
+    target_link_options(wloop_stop_request_test PRIVATE "-Wl,--wrap=epoll_ctl" "-Wl,--wrap=send" "-Wl,--wrap=wloopInvokeWriteCallback")
     target_link_libraries(wloop_stop_request_test PRIVATE ww)
     add_dependencies(waterwall_unit_tests wloop_stop_request_test)
 
@@ -716,8 +671,15 @@
         "unit;signal-manager;shutdown;signals"
       )
 
-      waterwall_add_native_executable(node_manager_startup_test SUPPORT SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/core/node_manager_startup_test.c)
+      waterwall_add_native_executable(node_manager_startup_test SUPPORT SOURCES
+        ${WATERWALL_UNIT_SOURCE_ROOT}/core/node_manager_startup_test.c
+        ${CMAKE_SOURCE_DIR}/core/imported_tunnels.c)
+      target_include_directories(node_manager_startup_test PRIVATE ${CMAKE_SOURCE_DIR}/core)
       target_link_libraries(node_manager_startup_test PRIVATE ww_test_support ww)
+      if(TARGET BlackHole)
+        target_link_libraries(node_manager_startup_test PRIVATE BlackHole)
+        target_compile_definitions(node_manager_startup_test PRIVATE WW_TEST_BLACKHOLE_SINK=1)
+      endif()
       target_link_options(node_manager_startup_test PRIVATE "-Wl,--wrap=applicationShutdownWasRequested")
       add_dependencies(waterwall_unit_tests node_manager_startup_test)
       add_waterwall_unit_test(waterwall.node_manager_startup_unit node_manager_startup_test "unit;node-manager;startup;bufio")
@@ -904,7 +866,8 @@
       WW_EVENT_MEMORY_TEST_SEAM=1
     )
     target_link_libraries(line_task_scheduling_test PRIVATE ww)
-    target_link_options(line_task_scheduling_test PRIVATE "-Wl,--wrap=sbufDestroy" "-Wl,--wrap=bufferpoolReuseBuffer")
+    target_link_options(line_task_scheduling_test PRIVATE "-Wl,--wrap=sbufDestroy" "-Wl,--wrap=bufferpoolReuseBuffer"
+      "-Wl,--wrap=gettimeofday")
   add_dependencies(waterwall_unit_tests line_task_scheduling_test)
 
     add_waterwall_unit_test(

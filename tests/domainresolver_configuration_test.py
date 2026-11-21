@@ -20,23 +20,21 @@ from wwtest.run_directory import RunDirectory
 from domainresolver_transport_integration import config, connector, node, UUID
 
 
-def run(binary, label, nodes, valid=False, dns_options=None, diagnostic_name="DomainResolver",
-        shared_dns_warning=None):
+def run(binary, label, nodes, valid=False, dns_options=None, diagnostic_name="DomainResolver", restricted=False,
+        absent=()):
     with RunDirectory("ww-resolver-config-") as root:
         core = core_config()
         if dns_options:
             core["dns"] = dns_options
         (root / "core.json").write_text(json.dumps(core))
         (root / "config.json").write_text(json.dumps({"name": label, "nodes": nodes}))
-        with Process([binary], cwd=root, log_path=root / "stdout.log",
+        command = [binary, "--restricted-config"] if restricted else [binary]
+        with Process(command, cwd=root, log_path=root / "stdout.log",
                      cleanup_signal=signal.SIGTERM) as process:
             deadline = time.monotonic() + 8
             while process.poll() is None and time.monotonic() < deadline:
                 output = process.log_path.read_text(errors="replace")
                 if valid and STARTED_MARKER in output:
-                    if shared_dns_warning is not None:
-                        warned = "Router: shared DNS TCP fallback" in output
-                        assert warned == shared_dns_warning, f"{label}: unexpected shared DNS diagnostic\n{output}"
                     process.send_signal(signal.SIGTERM)
                     assert process.wait(timeout=8) == 128 + signal.SIGTERM, f"{label}: shutdown failed"
                     return
@@ -47,6 +45,7 @@ def run(binary, label, nodes, valid=False, dns_options=None, diagnostic_name="Do
             assert process.returncode != 0, f"{label}: invalid configuration exited successfully"
             diagnostic = diagnostic_name in output or (label == "conflicting-predecessor" and "Node Map Failure" in output)
             assert diagnostic, f"{label}: missing resolver/topology diagnostic\n{output}"
+            assert all(text not in output for text in absent), output
             assert "Segmentation fault" not in output and "Assertion" not in output, output
 
 
@@ -78,7 +77,8 @@ def consumer_config(kind, policy="omitted", extra=None):
     if kind == "UdpStatelessSocket":
         nodes = [node("consumer", kind, settings, "app-out")]
     else:
-        nodes = [node("in", "TcpListener", {"address": "127.0.0.1", "port": 26750}, "consumer"),
+        listener = "UdpListener" if kind == "UdpConnector" else "TcpListener"
+        nodes = [node("in", listener, {"address": "127.0.0.1", "port": 26750}, "consumer"),
                  node("consumer", kind, settings)]
         if kind not in {"TcpConnector", "UdpConnector", "TcpUdpConnector"}:
             nodes[-1]["next"] = "app-out"
@@ -137,23 +137,27 @@ def embedded_configuration(binary, consumers):
         dns_rule = {"resolver-dns": True, "target": "app-out"}
         payload_rule = {"protocol": "http1", "target": "app-out"}
         cases = (
-            ("root-sniff", shared, {"sniffing": ["http1"], "rules": [dns_rule]}, True),
-            ("payload-first", shared, {"rules": [payload_rule, dns_rule]}, True),
-            ("metadata-first", shared, {"rules": [dns_rule, payload_rule]}, False),
-            ("udp-only-prefix", shared, {"rules": [dict(dns_rule, network="udp"), payload_rule]}, True),
+            ("root-sniff", shared, {"sniffing": ["http1"], "rules": [dns_rule]}),
+            ("payload-first", shared, {"rules": [payload_rule, dns_rule]}),
+            ("metadata-first", shared, {"rules": [dns_rule, payload_rule]}),
+            ("udp-only-prefix", shared, {"rules": [dict(dns_rule, network="udp"), payload_rule]}),
             ("separate-branch", dict(shared, **{"dns-next": "dns-out"}),
-             {"sniffing": ["http1"], "rules": [payload_rule]}, False),
-            ("native", {"resolve": True}, {"sniffing": ["http1"], "rules": [payload_rule]}, False),
+             {"sniffing": ["http1"], "rules": [payload_rule]}),
+            ("native", {"resolve": True}, {"sniffing": ["http1"], "rules": [payload_rule]}),
         )
-        for label, policy, extra, warning in cases:
-            run(binary, "router-dns-diagnostic-" + label, consumer_config("Router", policy, extra), True,
-                shared_dns_warning=warning)
+        for label, policy, extra in cases:
+            run(binary, "router-dns-" + label, consumer_config("Router", policy, extra), True)
 
     if "VmessClient" in consumers:
-        for framing, settings, valid in (
-                ("tcp-only", {"security": "zero", "protocol": "tcp"}, False),
-                ("udp-only", {"security": "none", "protocol": "udp", "global-padding": True}, False),
-                ("both", {"security": "aes-128-gcm", "protocol": "tcp"}, True)):
+        shared = {"resolve": True, "mode": "chain", "servers": ["127.0.0.1:53"]}
+        for framing, settings, refusal in (
+                ("tcp-only", {"security": "zero", "protocol": "tcp"}, "accepts TCP streams only; cannot send UDP queries"),
+                ("udp-only", {"security": "none", "protocol": "udp", "global-padding": True},
+                 "accepts UDP datagrams only; cannot retry a truncated reply over TCP"),
+                ("both", {"security": "aes-128-gcm", "protocol": "tcp"}, None)):
+            if refusal:
+                run(binary, "vmess-shared-" + framing, consumer_config("VmessClient", shared, settings),
+                    diagnostic_name="shared DNS entry consumer framing " + refusal)
             for embedded in (False, True):
                 if embedded:
                     nodes = consumer_config("VmessClient", {"resolve": True, "mode": "chain",
@@ -166,12 +170,44 @@ def embedded_configuration(binary, consumers):
                     "target-address": "dest_context->address", "port": "dest_context->port", **settings}, "carrier")
                 nodes.append(node("carrier", "TcpConnector", {"address": "127.0.0.1", "port": 26744,
                                                                "fastopen": False}))
-                run(binary, f"vmess-entry-{framing}-{'embedded' if embedded else 'standalone'}", nodes, valid)
+                run(binary, f"vmess-entry-{framing}-{'embedded' if embedded else 'standalone'}", nodes,
+                    valid=refusal is None, diagnostic_name="DNS entry dns-out (VmessClient) " + (refusal or ""))
+
+
+def dns_entry_payload_modes(binary):
+    for payload_mode in ("stream", "datagram", "dest_context->protocol"):
+        nodes = config("chain", "127.0.0.1:53")
+        nodes[-1] = node("dns-out", "UserController", {
+            "auth-client-node-name": "accounts", "payload-mode": payload_mode}, "dns-peer")
+        nodes.extend([connector("dns-peer"),
+                      node("accounts", "AuthenticationClient", {"name": "edge", "secret": "fixture"}, "auth-out"),
+                      node("auth-out", "BlackHole", {"mode": "passive"})])
+        if payload_mode == "dest_context->protocol":
+            run(binary, "dns-entry-dynamic", nodes, valid=True)
+            continue
+        detail = ("accepts TCP streams only; cannot send UDP queries" if payload_mode == "stream" else
+                  "accepts UDP datagrams only; cannot retry a truncated reply over TCP")
+        detail += '; set payload-mode to "dest_context->protocol"'
+        run(binary, "dns-entry-" + payload_mode, nodes,
+            diagnostic_name="DNS entry dns-out (UserController) " + detail)
+        run(binary, "restricted-entry-" + payload_mode, nodes, restricted=True, absent=("dns-out",),
+            diagnostic_name="DNS entry <restricted> (<restricted>) " + detail)
+
+    # The embedded-owner follow-up must also hide its configured identifiers.
+    nodes = [node("in", "TcpListener", {"address": "127.0.0.1", "port": 26750}, "private-owner-name"),
+             node("private-owner-name", "TcpConnector", {"address": "dest_context->address",
+                  "port": "dest_context->port", "dns-behaviour": {"resolve": True, "mode": "chain",
+                  "dns-next": "private-entry-name", "servers": ["127.0.0.1:53"]}}),
+             node("private-entry-name", "TcpConnector", {"address": "127.0.0.1", "port": 53})]
+    run(binary, "restricted-embedded-entry", nodes, restricted=True,
+        diagnostic_name="DNS entry <restricted> (<restricted>) accepts TCP streams only; cannot send UDP queries",
+        absent=("private-owner-name", "private-entry-name", "payload-mode"))
 
 
 def main():
     binary = sys.argv[1]
     install_termination_handler()
+    dns_entry_payload_modes(binary)
     for mode in ("omitted", "native", "direct", "direct6", "chain", "chain-default", "shared", "shared-explicit"):
         run(binary, "valid-" + mode, config(mode, "[::1]:53" if mode == "direct6" else "127.0.0.1:53"), True)
     # TcpUdpConnector inserts private resolver preparation before its public inlet.

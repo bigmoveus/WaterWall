@@ -17,6 +17,8 @@ static const char *domainresolverCopyDomainForLog(const address_context_t *dest_
 bool domainresolverUpdateSourcePressure(tunnel_t *t, line_t *l)
 {
     domainresolver_lstate_t *ls     = lineGetState(l, t);
+    if (ls->phase == kDomainResolverPhaseClosing)
+        return true;
     const bool               paused = ls->pending_source_hold || ls->next_paused;
     if (ls->source_paused == paused)
         return true;
@@ -36,20 +38,21 @@ bool domainresolverDrainPending(tunnel_t *t, line_t *l)
         return true;
     lineRef(l);
     ls->draining = true;
-    while (lineIsAlive(l) && ! ls->next_paused && bufferqueueGetEntryCount(&ls->pending) != 0)
+    while (lineIsAlive(l) && ls->phase == kDomainResolverPhaseOpen && ! ls->next_paused &&
+           bufferqueueGetEntryCount(&ls->pending) != 0)
     {
         sbuf_t *buf = bufferqueuePopFront(&ls->pending);
         tunnelNextUpStreamPayload(t, l, buf);
     }
     bool alive = lineIsAlive(l);
-    if (alive)
+    if (alive && ls->phase == kDomainResolverPhaseOpen)
     {
         ls->draining = false;
         if (bufferqueueGetEntryCount(&ls->pending) == 0)
             ls->pending_source_hold = false;
         alive = domainresolverUpdateSourcePressure(t, l);
-        if (alive && tunnelIsActiveForLine(t, l) && ! ls->init_dispatching && ! ls->draining &&
-            ! ls->pending_source_hold && bufferqueueGetEntryCount(&ls->pending) == 0 &&
+        if (alive && ls->phase == kDomainResolverPhaseOpen && tunnelIsActiveForLine(t, l) && ! ls->init_dispatching &&
+            ! ls->draining && ! ls->pending_source_hold && bufferqueueGetEntryCount(&ls->pending) == 0 &&
             ! tunnelchainIsWorkerPacketLine(tunnelGetChain(t), l))
         {
             /* Next consumed its prepare state during Init. Only matched
@@ -70,7 +73,7 @@ void domainresolverOpenPath(tunnel_t *t, line_t *l)
     ls->phase            = kDomainResolverPhaseOpen;
     ls->init_dispatching = true;
     tunnelNextUpStreamInit(t, l);
-    if (lineIsAlive(l))
+    if (lineIsAlive(l) && ls->phase == kDomainResolverPhaseOpen)
     {
         ls->init_dispatching = false;
         if (ls->prev_paused && ! ls->read_pause_sent)
@@ -174,8 +177,11 @@ bool domainresolverStartResolveIfNeeded(tunnel_t *t, line_t *l, domainresolver_l
 
     addresscontextSetDomainStrategy(dest_ctx, domainresolverStrategyForLine(ts, dest_ctx));
 
-    const char *domain   = dest_ctx->domain;
-    int         socktype = addresscontextGetSockType(dest_ctx);
+    const char   *domain   = dest_ctx->domain;
+    const uint8_t offer    = addresscontextGetTransportOffer(dest_ctx);
+    const int     socktype = offer == kAddressContextTransportTcp   ? SOCK_STREAM
+                             : offer == kAddressContextTransportUdp ? SOCK_DGRAM
+                                                                    : 0;
 
     if (ts->verbose)
     {
@@ -243,7 +249,7 @@ static void domainresolverLogPendingRefusal(tunnel_t *t, line_t *l, domainresolv
         const sockaddr_u peer = addresscontextToSockAddr(dest);
         destination           = SOCKADDR_STR(&peer, address);
     }
-    const int socktype = addresscontextGetSockType(dest);
+    const uint8_t offer = addresscontextGetTransportOffer(dest);
     loggerPrint(getDnsLogger(),
                 LOG_LEVEL_ERROR,
                 "DomainResolver: node=%s worker=%u destination=%s port=%u transport=%s reason=%s "
@@ -252,9 +258,10 @@ static void domainresolverLogPendingRefusal(tunnel_t *t, line_t *l, domainresolv
                 (unsigned) wid,
                 destination,
                 (unsigned) dest->port,
-                socktype == SOCK_STREAM  ? "tcp"
-                : socktype == SOCK_DGRAM ? "udp"
-                                         : "unknown",
+                offer == kAddressContextTransportTcp    ? "tcp"
+                : offer == kAddressContextTransportUdp  ? "udp"
+                : offer == kAddressContextTransportBoth ? "tcp/udp"
+                                                        : "unknown",
                 name,
                 current,
                 incoming,
@@ -280,14 +287,15 @@ bool domainresolverQueuePayload(tunnel_t *t, line_t *l, domainresolver_lstate_t 
 void domainresolverCloseLine(tunnel_t *t, line_t *l)
 {
     domainresolver_lstate_t *ls       = lineGetState(l, t);
-    bool                     was_open = ls->phase == kDomainResolverPhaseOpen;
+    bool                     source_finished = ls->phase == kDomainResolverPhaseClosing;
+    bool                     was_open        = ls->phase == kDomainResolverPhaseOpen || source_finished;
     lineRef(l);
     domainresolverLinestateDestroy(t, l, ls);
     if (was_open && lineIsAlive(l))
     {
         tunnelNextUpStreamFinish(t, l);
     }
-    if (lineIsAlive(l))
+    if (! source_finished && lineIsAlive(l))
     {
         tunnelPrevDownStreamFinish(t, l);
     }

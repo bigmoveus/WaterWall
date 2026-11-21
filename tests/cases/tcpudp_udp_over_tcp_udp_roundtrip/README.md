@@ -7,10 +7,16 @@ Configured nodes and onward edges (`next`; listeners/connectors form the OS tran
 
 - `tester-client`: `TesterClient` → `outer-udp-connector`
 - `outer-udp-connector`: `UdpConnector` (terminal or independently bound endpoint)
-- `tcpudp-listener`: `TcpUdpListener` → `uot-client`
-- `uot-client`: `UdpOverTcpClient` → `carrier-tcp-connector`
+- `tcpudp-listener`: `TcpUdpListener` → `select-transport`
+- `select-transport`: `Router` sends UDP to `uot-client` and other traffic to `discard-stream`
+- `discard-stream`: `BlackHole` (passive TCP default)
+- `uot-client`: `UdpOverTcpClient` adds each datagram length → `write-line-mark`
+- `write-line-mark`: `HeaderClient` prefixes the TCP stream once with the configured 16-byte line mark → `carrier-tcp-connector`
 - `carrier-tcp-connector`: `TcpConnector` (terminal or independently bound endpoint)
-- `carrier-tcp-listener`: `TcpListener` → `uot-server`
+- `carrier-tcp-listener`: `TcpListener` → `read-line-mark`
+- `read-line-mark`: `HeaderServer` restores the line mark and keeps TCP → `route-marked-stream`
+- `route-marked-stream`: `Router` matches both TCP and the configured mark, then sends the stream to `uot-server`
+- `discard-unmarked-stream`: `BlackHole` (passive default)
 - `uot-server`: `UdpOverTcpServer` → `tcpudp-connector`
 - `tcpudp-connector`: `TcpUdpConnector` (terminal or independently bound endpoint)
 - `outer-udp-listener`: `UdpListener` → `tester-server`

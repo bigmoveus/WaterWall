@@ -15,7 +15,7 @@ endif()
 set(CMAKE_UNITY_BUILD_BATCH_SIZE 500)
 
 project(Waterwall
-  VERSION 1.5.42
+  VERSION 1.6.0
   DESCRIPTION "A fast and secure VPN tunnel"
   HOMEPAGE_URL "https://github.com/radkesvat/waterwall"
   LANGUAGES C CXX
@@ -212,7 +212,8 @@ option(INCLUDE_SPEEDTEST_SERVER         "link SpeedTestServer staticly to the co
 option(INCLUDE_AUTHENTICATION_CLIENT    "link AuthenticationClient staticly to the core"                            TRUE)
 option(INCLUDE_API_SERVER               "link APIServer statically to the core"                                     TRUE)
 option(INCLUDE_AUTHENTICATION_SERVER    "link AuthenticationServer staticly to the core"                            TRUE)
-option(INCLUDE_WIREGUARD_DEVICE         "link WireGuardDevice staticly to the core"                                 TRUE)
+option(INCLUDE_WIREGUARD_CLIENT         "link WireGuardClient statically to the core" TRUE)
+option(INCLUDE_WIREGUARD_SERVER         "link WireGuardServer statically to the core" TRUE)
 option(INCLUDE_PACKET_TO_CONNECTION     "link PacketsToConnection staticly to the core"                             TRUE)
 option(INCLUDE_CONNECTION_TO_PACKETS    "link ConnectionToPackets staticly to the core"                             TRUE)
 option(INCLUDE_STREAM_TO_PACKETS        "link StreamToPackets staticly to the core"                                 TRUE)
@@ -225,6 +226,8 @@ option(INCLUDE_FAKE_TCP_HEADER_CLIENT   "link FakeTcpHeaderClient statically to 
 option(INCLUDE_FAKE_TCP_HEADER_SERVER   "link FakeTcpHeaderServer statically to the core"                           TRUE)
 option(INCLUDE_PING_CLIENT              "link PingClient staticly to the core"                                      TRUE)
 option(INCLUDE_PING_SERVER              "link PingServer staticly to the core"                                      TRUE)
+option(INCLUDE_PING6_CLIENT             "link Ping6Client statically to the core"                                   TRUE)
+option(INCLUDE_PING6_SERVER             "link Ping6Server statically to the core"                                   TRUE)
 option(INCLUDE_KEEPALIVE_CLIENT         "link KeepAliveClient staticly to the core"                                 TRUE)
 option(INCLUDE_KEEPALIVE_SERVER         "link KeepAliveServer staticly to the core"                                 TRUE)
 option(INCLUDE_CONNECTION_FISHER_CLIENT "link ConnectionFisherClient staticly to the core"                          TRUE)
@@ -241,6 +244,10 @@ option(INCLUDE_UDP_OVER_TCP_CLIENT      "link UdpOverTcpClient staticly to the c
 option(INCLUDE_UDP_OVER_TCP_SERVER      "link UdpOverTcpServer staticly to the core"                                TRUE)
 option(INCLUDE_KCP_CLIENT               "link KcpClient staticly to the core"                                       TRUE)
 option(INCLUDE_KCP_SERVER               "link KcpServer staticly to the core"                                       TRUE)
+option(INCLUDE_ENET_CLIENT              "link EnetClient statically to the core"                                    TRUE)
+option(INCLUDE_ENET_SERVER              "link EnetServer statically to the core"                                    TRUE)
+option(INCLUDE_GNS_CLIENT               "link GnsClient statically to the core"                                     TRUE)
+option(INCLUDE_GNS_SERVER               "link GnsServer statically to the core"                                     TRUE)
 option(INCLUDE_BRIDGE                   "link Bridge staticly to the core"                                          TRUE)
 option(INCLUDE_SNIFF_ROUTER             "link SniffRouter staticly to the core"                                     TRUE)
 option(INCLUDE_ROUTER                   "link Router staticly to the core"                                          TRUE)
@@ -260,6 +267,8 @@ option(INCLUDE_HTTP_SERVER              "link HttpServer staticly to the core"  
 option(INCLUDE_HTTP_PROXY_CLIENT        "link HttpProxyClient statically to the core"                               TRUE)
 option(INCLUDE_HTTP_PROXY_SERVER        "link HttpProxyServer statically to the core"                               TRUE)
 option(INCLUDE_HTTP_CLIENT              "link HttpClient staticly to the core"                                      TRUE)
+option(INCLUDE_RTMP_CLIENT              "link RtmpClient statically to the core"                                    TRUE)
+option(INCLUDE_RTMP_SERVER              "link RtmpServer statically to the core"                                    TRUE)
 option(INCLUDE_SOCKS5_CLIENT            "link Socks5Client staticly to the core"                                    TRUE)
 option(INCLUDE_PROTOBUF_SERVER          "link ProtoBufServer staticly to the core"                                  FALSE)
 option(INCLUDE_PROTOBUF_CLIENT          "link ProtoBufClient staticly to the core"                                  FALSE)
@@ -287,6 +296,7 @@ option(INCLUDE_MUX_CLIENT               "link MuxClient staticly to the core"   
 option(INCLUDE_TUN_DEVICE               "link TunDevice staticly to the core"                                       ${TUNDEVICE_SUPPORTED})
 option(INCLUDE_PACKET_GENERATOR         "link PacketGenerator staticly to the core"                                 TRUE)
 option(INCLUDE_PACKET_COUNTER           "link PacketCounter staticly to the core"                                   TRUE)
+option(INCLUDE_SYN_REPLY                "link SynReply statically to the core"                                      TRUE)
 option(INCLUDE_RAWSOCKET                "link RawSocket staticly to the core"                                       ${RAWSOCKET_SUPPORTED})
 option(INCLUDE_DISTURBER                "link Disturber staticly to the core"                                       TRUE)
 option(INCLUDE_JUNK_DATAGRAM_SENDER     "link JunkDatagramSender staticly to the core"                              TRUE)
@@ -577,12 +587,16 @@ endif()
 #--------------------------------------------------------------------------------
 # Tunnel Libraries
 
-if(INCLUDE_TLS_CLIENT OR INCLUDE_QUIC_CLIENT OR INCLUDE_QUIC_SERVER)
+if(INCLUDE_TLS_CLIENT OR INCLUDE_QUIC_CLIENT OR INCLUDE_QUIC_SERVER OR INCLUDE_GNS_CLIENT OR INCLUDE_GNS_SERVER)
   include("${CMAKE_CURRENT_SOURCE_DIR}/ww/cmake/dependencies/boringssl.cmake")
 endif()
 if(INCLUDE_QUIC_CLIENT OR INCLUDE_QUIC_SERVER)
   include("${CMAKE_CURRENT_SOURCE_DIR}/ww/cmake/dependencies/quiche.cmake")
   add_subdirectory(tunnels/Internals/QuicCommon)
+endif()
+if(INCLUDE_GNS_CLIENT OR INCLUDE_GNS_SERVER)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/ww/cmake/dependencies/gns.cmake")
+  add_subdirectory(tunnels/Internals/GnsCommon)
 endif()
 #--------------------------------------------------------------------------------
 
@@ -701,6 +715,13 @@ if(INCLUDE_PACKET_COUNTER)
   target_link_libraries(${WATERWALL_APPLICATION_TARGET} PacketCounter)
 endif()
 
+#syn reply
+if(INCLUDE_SYN_REPLY)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_SYN_REPLY=1)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/Internals/SynReply)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} SynReply)
+endif()
+
 #packet to connection
 if(INCLUDE_PACKET_TO_CONNECTION)
   target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_PACKET_TO_CONNECTION=1)
@@ -753,14 +774,6 @@ if(INCLUDE_RAWSOCKET)
   target_link_libraries(${WATERWALL_APPLICATION_TARGET} RawSocket)
 endif()
 
-#wiregurad device
-if(INCLUDE_WIREGUARD_DEVICE)
-  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_WIREGUARD_DEVICE=1)
-  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/WireGuardDevice)
-  target_link_directories(${WATERWALL_APPLICATION_TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tunnels/WireGuardDevice)
-  target_link_libraries(${WATERWALL_APPLICATION_TARGET} WireGuardDevice)
-endif()
-
 #layer3 ip route table
 if(INCLUDE_LAYER3_IP_ROUTING_TABLE)
   target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_LAYER3_IP_ROUTING_TABLE=1)
@@ -809,9 +822,8 @@ if(INCLUDE_FAKE_TCP_HEADER_SERVER)
   target_link_libraries(${WATERWALL_APPLICATION_TARGET} FakeTcpHeaderServer)
 endif()
 
-# Ping wire v2 codec is shared by either endpoint.  Keep it independent of
-# whether a build includes one node or both for plugin/minimal builds.
-if(INCLUDE_PING_CLIENT OR INCLUDE_PING_SERVER)
+# Shared Ping and Ping6 codecs stay independent of endpoint selection for minimal builds.
+if(INCLUDE_PING_CLIENT OR INCLUDE_PING_SERVER OR INCLUDE_PING6_CLIENT OR INCLUDE_PING6_SERVER)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/Internals/PingCommon)
 endif()
 
@@ -829,6 +841,22 @@ if(INCLUDE_PING_SERVER)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/PingServer)
   target_link_directories(${WATERWALL_APPLICATION_TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tunnels/PingServer)
   target_link_libraries(${WATERWALL_APPLICATION_TARGET} PingServer)
+endif()
+
+#ping6 client
+if(INCLUDE_PING6_CLIENT)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_PING6_CLIENT=1)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/Ping6Client)
+  target_link_directories(${WATERWALL_APPLICATION_TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tunnels/Ping6Client)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} Ping6Client)
+endif()
+
+#ping6 server
+if(INCLUDE_PING6_SERVER)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_PING6_SERVER=1)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/Ping6Server)
+  target_link_directories(${WATERWALL_APPLICATION_TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tunnels/Ping6Server)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} Ping6Server)
 endif()
 
 #keepalive client
@@ -928,6 +956,21 @@ if(INCLUDE_TCP_UDP_CONNECTOR)
   target_link_libraries(${WATERWALL_APPLICATION_TARGET} TcpUdpConnector)
 endif()
 
+# WireGuard protocol and fixed-role wrappers
+if(INCLUDE_WIREGUARD_CLIENT OR INCLUDE_WIREGUARD_SERVER)
+  add_subdirectory(tunnels/Internals/WireGuardCommon)
+endif()
+if(INCLUDE_WIREGUARD_CLIENT)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_WIREGUARD_CLIENT=1)
+  add_subdirectory(tunnels/WireGuardClient)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} WireGuardClient)
+endif()
+if(INCLUDE_WIREGUARD_SERVER)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_WIREGUARD_SERVER=1)
+  add_subdirectory(tunnels/WireGuardServer)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} WireGuardServer)
+endif()
+
 #udp stateless socket
 if(INCLUDE_UDP_STATELESS_SOCKET)
   target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_UDP_STATELESS_SOCKET=1)
@@ -972,6 +1015,36 @@ if(INCLUDE_KCP_SERVER)
   target_link_directories(${WATERWALL_APPLICATION_TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tunnels/KcpServer)
   target_link_directories(${WATERWALL_APPLICATION_TARGET} PUBLIC ${CMAKE_BINARY_DIR}/tunnels/KcpServer)
   target_link_libraries(${WATERWALL_APPLICATION_TARGET} KcpServer)
+endif()
+
+#enet
+if(INCLUDE_ENET_CLIENT OR INCLUDE_ENET_SERVER)
+  add_subdirectory(tunnels/Internals/EnetCommon)
+endif()
+
+if(INCLUDE_ENET_CLIENT)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_ENET_CLIENT=1)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/EnetClient)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} EnetClient)
+endif()
+
+if(INCLUDE_ENET_SERVER)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_ENET_SERVER=1)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/EnetServer)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} EnetServer)
+endif()
+
+#gns
+if(INCLUDE_GNS_CLIENT)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_GNS_CLIENT=1)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/GnsClient)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} GnsClient)
+endif()
+
+if(INCLUDE_GNS_SERVER)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_GNS_SERVER=1)
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/GnsServer)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} GnsServer)
 endif()
 
 #bridge
@@ -1044,6 +1117,22 @@ if(INCLUDE_HTTP_CLIENT)
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tunnels/HttpClient)
   target_link_directories(${WATERWALL_APPLICATION_TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tunnels/HttpClient)
   target_link_libraries(${WATERWALL_APPLICATION_TARGET} HttpClient)
+endif()
+
+if(INCLUDE_RTMP_CLIENT OR INCLUDE_RTMP_SERVER)
+  add_subdirectory(tunnels/Internals/RtmpCommon)
+endif()
+
+if(INCLUDE_RTMP_CLIENT)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_RTMP_CLIENT=1)
+  add_subdirectory(tunnels/RtmpClient)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} RtmpClient)
+endif()
+
+if(INCLUDE_RTMP_SERVER)
+  target_compile_definitions(${WATERWALL_APPLICATION_TARGET} PUBLIC INCLUDE_RTMP_SERVER=1)
+  add_subdirectory(tunnels/RtmpServer)
+  target_link_libraries(${WATERWALL_APPLICATION_TARGET} RtmpServer)
 endif()
 
 if(INCLUDE_SOCKS5_CLIENT OR INCLUDE_TROJAN_CLIENT OR INCLUDE_VLESS_CLIENT OR INCLUDE_VMESS_CLIENT)

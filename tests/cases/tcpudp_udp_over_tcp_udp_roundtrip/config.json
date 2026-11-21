@@ -27,11 +27,30 @@
         "address": "127.0.0.1",
         "port": 24950
       },
-      "next": "uot-client"
+      "next": "select-transport"
+    },
+    {
+      "name": "select-transport",
+      "type": "Router",
+      "settings": {
+        "rules": [{"network": "udp", "target": "uot-client"}]
+      },
+      "next": "discard-stream"
+    },
+    {
+      "name": "discard-stream",
+      "type": "BlackHole",
+      "settings": {"mode": "passive"}
     },
     {
       "name": "uot-client",
       "type": "UdpOverTcpClient",
+      "next": "write-line-mark"
+    },
+    {
+      "name": "write-line-mark",
+      "type": "HeaderClient",
+      "settings": {"data": "line-mark", "mark": "0102030405060708090a0b0c0d0e0f10"},
       "next": "carrier-tcp-connector"
     },
     {
@@ -52,7 +71,24 @@
         "port": 24951,
         "nodelay": true
       },
-      "next": "uot-server"
+      "next": "read-line-mark"
+    },
+    {
+      "name": "read-line-mark",
+      "type": "HeaderServer",
+      "settings": {"override": "line-mark"},
+      "next": "route-marked-stream"
+    },
+    {
+      "name": "route-marked-stream",
+      "type": "Router",
+      "settings": {"rules": [{"network": "tcp", "line-mark": "0102030405060708090a0b0c0d0e0f10", "target": "uot-server"}]},
+      "next": "discard-unmarked-stream"
+    },
+    {
+      "name": "discard-unmarked-stream",
+      "type": "BlackHole",
+      "settings": {"mode": "passive"}
     },
     {
       "name": "uot-server",

@@ -23,13 +23,14 @@ static twf_line_pool_t  lines;
 static uint8_t          captured[2 * 1024 * 1024];
 static size_t           captured_len;
 static bool             long_auth, omit_est;
-static unsigned         methods, auths, commands, inits, finishes, callback_depth, max_depth;
+static unsigned         methods, auths, commands, inits, establishments, finishes, callback_depth, max_depth;
 static unsigned         retained_mode;
-static bool             inject_est, inject_reply_payload;
+static bool             inject_init_reply, inject_reply_payload;
 static bool             inject_method, inject_auth, inject_init, inject_payload, close_reply, reject_auth, pause_init;
 static bool             splice_input, require_ordinary, independent_sources;
 static sbuf_t          *expected_upstream_buffer, *expected_downstream_buffer;
 static unsigned         provider_opens, provider_closes;
+static uint8_t          command_reply_status;
 static const uint8_t    request[]     = {5, 1, 0, 1, 127, 0, 0, 1, 0, 80};
 static const uint8_t    credentials[] = {1, 1, 'u', 1, 'p'};
 
@@ -104,12 +105,8 @@ static void requireBypassed(line_t *l)
 static void established(tunnel_t *t, line_t *l)
 {
     discard t;
-    if (inject_est)
-    {
-        inject_est = false;
-        tunnelDownStreamEst(server, l);
-        requireBypassed(l);
-    }
+    twfRequire(l == control, "transport Est was forwarded on the wrong line");
+    ++establishments;
 }
 static void ownerFinish(tunnel_t *t, line_t *l)
 {
@@ -146,8 +143,6 @@ static void reply(tunnel_t *t, line_t *l, sbuf_t *b)
         uint8_t body;
         sbufReadRangeToMemory(b, &body, sizeof(body));
         twfRequire(commands == 1 && body == 'R', "retained body changed or preceded the success reply");
-        twfRequire(captured_len < sizeof(captured), "downstream capture overflow");
-        captured[captured_len++] = body;
         lineReuseBuffer(l, b);
         inject_reply_payload = false;
         twfRequire(tunnelIsActiveForLine(server, l), "server bypassed during response FIFO delivery");
@@ -181,6 +176,7 @@ static void reply(tunnel_t *t, line_t *l, sbuf_t *b)
     else
     {
         twfRequire(n == 10 && p[0] == 5, "invalid command reply");
+        command_reply_status = p[1];
         ++commands;
     }
     lineReuseBuffer(l, b);
@@ -216,6 +212,8 @@ static void initNext(tunnel_t *t, line_t *l)
                    "username unavailable in Init");
     if (inject_init)
         sendBytes("I", 1);
+    if (inject_init_reply)
+        tunnelDownStreamPayload(server, l, bytes("R", 1));
     if (pause_init)
         tunnelDownStreamPause(server, l);
     if (retained_mode)
@@ -253,6 +251,7 @@ static void initNext(tunnel_t *t, line_t *l)
     }
     if (! omit_est)
         tunnelDownStreamEst(server, l);
+    twfRequire(commands == 0, "CONNECT succeeded before next Init returned");
     twfRequire(tunnelIsActiveForLine(server, l), "server bypassed before next Init returned");
 }
 static void setupMode(bool auth, bool udp_only)
@@ -288,15 +287,16 @@ static void setupMode(bool auth, bool udp_only)
     control = twfLinePoolCreateLine(&lines);
     lineRef(control);
     addresscontextSetOnlyProtocol(lineGetSourceAddressContext(control), IP_PROTO_TCP);
+    addresscontextSetOnlyProtocol(lineGetDestinationAddressContext(control), IP_PROTO_TCP);
     socks5server_tstate_t *ts = tunnelGetState(server);
     ts->no_auth               = ! auth;
     ts->allow_connect         = ! udp_only;
     ts->allow_udp             = udp_only;
     ts->auth_client_tunnel    = next;
     long_auth = omit_est = false;
-    captured_len = methods = auths = commands = inits = finishes = callback_depth = max_depth = 0;
+    captured_len = methods = auths = commands = inits = establishments = finishes = callback_depth = max_depth = 0;
     retained_mode                                                                             = 0;
-    inject_est = inject_reply_payload = false;
+    inject_init_reply = inject_reply_payload = false;
     inject_method = inject_auth = inject_init = inject_payload = close_reply = reject_auth = pause_init = false;
     splice_input = require_ordinary = false;
     expected_upstream_buffer = expected_downstream_buffer = NULL;
@@ -324,10 +324,84 @@ static void teardown(void)
     tunnelDestroy(next);
     twfWorkerEnvTeardown(&env);
 }
+static void mismatchedIngressOffers(void)
+{
+    twfSetCase("SOCKS5 normal ingress requires a destination compatible with its source role");
+    setup(false);
+    const struct
+    {
+        uint8_t source;
+        uint8_t destination;
+    } cases[] = {{IP_PROTO_TCP, IP_PROTO_UDP}, {IP_PROTO_UDP, IP_PROTO_TCP}};
+    for (size_t i = 0; i < ARRAY_SIZE(cases); ++i)
+    {
+        line_t *l = twfLinePoolCreateLine(&lines);
+        lineRef(l);
+        addresscontextSetOnlyProtocol(lineGetSourceAddressContext(l), cases[i].source);
+        addresscontextSetOnlyProtocol(lineGetDestinationAddressContext(l), cases[i].destination);
+        tunnelUpStreamInit(server, l);
+        twfRequire(! lineIsAlive(l), "incompatible destination survived SOCKS ingress Init");
+        lineUnref(l);
+    }
+    twfRequire(finishes == 2 && methods == 0 && inits == 0, "refused ingress entered the SOCKS protocol");
+    teardown();
+}
+
 static void method(bool auth)
 {
     const uint8_t greeting[] = {5, 1, auth ? 2 : 0};
     sendBytes(greeting, sizeof(greeting));
+}
+static void refuseNextInit(tunnel_t *t, line_t *l)
+{
+    initNext(t, l);
+    tunnelPrevDownStreamFinish(t, l);
+}
+static void connectInitResult(void)
+{
+    uint8_t wire[sizeof(request) + 1];
+    memoryCopy(wire, request, sizeof(request));
+    wire[sizeof(request)] = 'T';
+
+    for (unsigned late_est = 0; late_est < 2; ++late_est)
+    {
+        twfSetCase(late_est ? "late transport Est is forwarded after CONNECT"
+                            : "CONNECT succeeds and can close without Est");
+        setup(false);
+        omit_est = true;
+        method(false);
+        sendBytes(wire, sizeof(wire));
+        twfRequire(commands == 1 && command_reply_status == kSocks5ReplySucceeded && inits == 1 && establishments == 0,
+                   "CONNECT did not succeed after live Init or manufactured an Est");
+        twfRequire(lineIsAlive(control) && captured_len == 1 && captured[0] == 'T' && finishes == 0,
+                   "accepted CONNECT lost its queued payload");
+        requireBypassed(control);
+        if (late_est)
+        {
+            tunnelDownStreamEst(server, control);
+            tunnelDownStreamEst(server, control);
+            twfRequire(establishments == 2 && commands == 1,
+                       "late transport Est was suppressed or duplicated CONNECT success");
+        }
+        tunnelDownStreamFin(server, control);
+        twfRequire(! lineIsAlive(control) && finishes == 1 && commands == 1,
+                   "backend Finish after CONNECT did not close the stream without another reply");
+        teardown();
+    }
+
+    for (unsigned early_est = 0; early_est < 2; ++early_est)
+    {
+        twfSetCase(early_est ? "next Init refuses CONNECT after synchronous Est" : "next Init refuses CONNECT");
+        setup(false);
+        omit_est      = early_est == 0;
+        next->fnInitU = refuseNextInit;
+        method(false);
+        sendBytes(wire, sizeof(wire));
+        twfRequire(! lineIsAlive(control) && commands == 1 && command_reply_status == kSocks5ReplyGeneralFailure &&
+                       inits == 1 && finishes == 1 && establishments == early_est && captured_len == 0,
+                   "synchronous refusal sent success or let the queued payload through");
+        teardown();
+    }
 }
 static void reentry(bool auth)
 {
@@ -515,22 +589,18 @@ static void addressBoundaries(void)
 }
 static void admittedOrdering(void)
 {
-    twfSetCase("pre-Est application admission");
+    twfSetCase("queued application and backend input follows next Init");
     setup(false);
     method(false);
-    omit_est = true;
+    omit_est = inject_init_reply = inject_reply_payload = true;
     uint8_t request_tail[sizeof(request) + 1];
     memoryCopy(request_tail, request, sizeof(request));
     request_tail[sizeof(request)] = 'A';
     sendBytes(request_tail, sizeof(request_tail));
     sendBytes("B", 1);
-    twfRequire(captured_len == 2 && memoryEqual(captured, "AB", 2) && commands == 0, "pre-Est input was delayed");
-    twfRequire(tunnelIsActiveForLine(server, control), "server bypassed before its success reply");
-    inject_est = inject_reply_payload = true;
-    tunnelDownStreamPayload(server, control, bytes("R", 1));
-    tunnelDownStreamEst(server, control);
-    twfRequire(commands == 1, "Est failed to send one success reply");
-    twfRequire(! inject_reply_payload && captured_len == 4 && memoryEqual(captured, "ABRP", 4),
+    twfRequire(commands == 1 && command_reply_status == kSocks5ReplySucceeded && establishments == 0,
+               "the queued input did not follow one success reply after Init");
+    twfRequire(! inject_reply_payload && captured_len == 3 && memoryEqual(captured, "APB", 3),
                "response reentry stranded or reordered upstream work before bypass");
     requireBypassed(control);
     teardown();
@@ -756,10 +826,12 @@ int main(int argc, char **argv)
         body(0);
         return 0;
     }
+    mismatchedIngressOffers();
     udpControlPreferences();
     spliceNegotiation();
     admittedOrdering();
     addressBoundaries();
+    connectInitResult();
     maximumMetadataSplits();
     retainedLimits(false);
     retainedLimits(true);

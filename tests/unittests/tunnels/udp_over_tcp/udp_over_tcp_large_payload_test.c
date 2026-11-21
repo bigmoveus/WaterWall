@@ -75,6 +75,7 @@ static void testPayload(uint8_t source_protocol, uint32_t length)
     tunnelBind(uot, next);
     line_t *line = twfLineCreate(uot->lstate_size);
     addresscontextSetOnlyProtocol(lineGetSourceAddressContext(line), source_protocol);
+    addresscontextSetTransportOffer(lineGetDestinationAddressContext(line), kAddressContextTransportBoth);
     uot->fnInitU(uot, line);
 #ifdef TEST_UOT_SERVER
     twfRequire(lineGetDestinationAddressContext(line)->proto_udp && ! lineGetDestinationAddressContext(line)->proto_tcp,
@@ -139,6 +140,7 @@ int main(void)
     const uint8_t source_protocols[] = {IP_PROTO_UDP, IP_PROTO_TCP, 0};
     for (unsigned i = 0; i < sizeof(source_protocols); ++i)
     {
+        testPayload(source_protocols[i], 0);
         testPayload(source_protocols[i], 1);
         testPayload(source_protocols[i], kMaxAllowedUDPPacketLength);
         testPayload(source_protocols[i], kMaxAllowedUDPPacketLength + 1);

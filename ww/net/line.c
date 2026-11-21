@@ -145,6 +145,38 @@ void lineCopyUsers(line_t *const dest, const line_t *const src)
     }
 }
 
+void lineCopyIngressContext(line_t *const dest, const line_t *const src)
+{
+    assert(dest != NULL && src != NULL && dest != src);
+    assert(lineIsOnCurrentWorker(src));
+    assert(lineIsAlive(dest) && lineIsAlive(src));
+    assert(dest->user_count == 0);
+
+    routing_context_t       *destination = &dest->routing_context;
+    const routing_context_t *source      = &src->routing_context;
+    addresscontextCopy(&destination->src_ctx, &source->src_ctx);
+    destination->local_listener_port = source->local_listener_port;
+    destination->peer_source_port    = source->peer_source_port;
+    lineCopyUsers(dest, src);
+}
+
+void lineCopyContext(line_t *const dest, const line_t *const src)
+{
+    assert(dest != NULL && lineIsOnCurrentWorker(dest));
+    lineCopyIngressContext(dest, src);
+    addresscontextCopy(&dest->routing_context.dest_ctx, &src->routing_context.dest_ctx);
+}
+
+bool lineMarkParseHex(const char *hex, line_mark_t *out)
+{
+    assert(hex != NULL && out != NULL);
+    line_mark_t mark;
+    if (! asciiHexDecodeBytes((const uint8_t *) hex, stringLength(hex), mark.bytes, sizeof(mark.bytes)))
+        return false;
+    *out = mark;
+    return true;
+}
+
 void lineClearUsers(line_t *const line)
 {
     if (line == NULL)
@@ -193,12 +225,8 @@ void lineUnRefInternal(line_t *l)
     generic_pool_t *const provenance_pool = l->pools[0];
     debugAssertZeroBuf(&l->tunnels_line_state[0], genericpoolGetItemSize(provenance_pool) - sizeof(line_t));
 
-    if (l->routing_context.dest_ctx.domain != NULL && ! l->routing_context.dest_ctx.domain_constant)
-    {
-        memoryFree(l->routing_context.dest_ctx.domain);
-        l->routing_context.dest_ctx.domain = NULL;
-    }
-
+    addresscontextReset(&l->routing_context.src_ctx);
+    addresscontextReset(&l->routing_context.dest_ctx);
     lineClearUsers(l);
 
     worker_t *current = tryGetCurrentWorker();

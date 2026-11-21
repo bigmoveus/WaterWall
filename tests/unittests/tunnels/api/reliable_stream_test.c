@@ -14,6 +14,7 @@
 #include "KcpClient/interface.h"
 #include "KcpServer/interface.h"
 #include "test_assert.h"
+#include "wevent.h"
 #include "wwapi.h"
 
 #define require(condition, message) TEST_REQUIRE(TEST_FAILURE_EXIT, condition, message)
@@ -256,6 +257,7 @@ int main(void)
     nodeApiFreeze();
     atomicStoreExplicit(&GSTATE.workers_run_flag, true, memory_order_release);
     connection = lineCreateForWorker(0, chain->line_pools, 0); /* Fixture source owns this normal line. */
+    addresscontextSetOnlyProtocol(lineGetDestinationAddressContext(connection), IP_PROTO_TCP);
     tunnelNextUpStreamInit(source, connection);
     static const char request[] =
         "{\"id\":\"large-reliable\",\"auth\":{\"client\":\"fixture-client\","
