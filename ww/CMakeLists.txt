@@ -644,6 +644,7 @@ elseif(UNIX AND NOT ANDROID)
 
 elseif(WIN32)
     target_sources(ww PRIVATE devices/windows_driver_artifacts.c
+        devices/windows_kill_switch_control.c
         devices/windows_session_effects.c)
     # WinDivert for x64 systems
     if(CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
@@ -678,8 +679,9 @@ elseif(WIN32)
     endif()
     
     target_sources(ww PRIVATE devices/tun/tun_windows.c devices/tun/tun_windows_dns.c devices/tun/tun_windows_ownership.c)
-    target_link_libraries(ww PUBLIC bcrypt setupapi)
+    target_link_libraries(ww PUBLIC bcrypt setupapi ole32)
 
+    target_sources(ww PRIVATE event/udp_pktinfo_win.c)
     # Event backend configuration
     # NOTE: the earlier unconditional `set(WITH_WEPOLL 1)` that forced wepoll on
     # regardless of the cache value has been removed so WITH_WEPOLL/WITH_NATIVE_IOCP
@@ -1213,6 +1215,9 @@ set(WW_LWIP_PATCH_RECIPE "${CMAKE_CURRENT_SOURCE_DIR}/lwip/pretend_patch.cmake")
 set(WW_LWIP_PATCH_STAMP "${LWIP_DIR}/.waterwall-lwip-patch-stamp")
 file(SHA256 "${WW_LWIP_PATCH_RECIPE}" WW_LWIP_PATCH_RECIPE_SHA256)
 include("${WW_LWIP_PATCH_RECIPE}")
+set(WW_LWIP_UPSTREAM_TCP_INPUT_RECIPE "${CMAKE_CURRENT_SOURCE_DIR}/lwip/upstream_tcp_input_patch.cmake")
+file(SHA256 "${WW_LWIP_UPSTREAM_TCP_INPUT_RECIPE}" WW_LWIP_UPSTREAM_TCP_INPUT_RECIPE_SHA256)
+include("${WW_LWIP_UPSTREAM_TCP_INPUT_RECIPE}")
 set(WW_LWIP_ENGINE_RECIPE "${CMAKE_CURRENT_SOURCE_DIR}/lwip/engine_patch.cmake")
 file(SHA256 "${WW_LWIP_ENGINE_RECIPE}" WW_LWIP_ENGINE_RECIPE_SHA256)
 include("${WW_LWIP_ENGINE_RECIPE}")
@@ -1243,8 +1248,13 @@ include("${WW_LWIP_TCP_OUTPUT_TAIL_RECIPE}")
 set(WW_LWIP_TCP_TIMESTAMPS_RECIPE "${CMAKE_CURRENT_SOURCE_DIR}/lwip/tcp_timestamps_patch.cmake")
 file(SHA256 "${WW_LWIP_TCP_TIMESTAMPS_RECIPE}" WW_LWIP_TCP_TIMESTAMPS_RECIPE_SHA256)
 include("${WW_LWIP_TCP_TIMESTAMPS_RECIPE}")
+set(WW_LWIP_TCP_BOUND_MSS_RECIPE "${CMAKE_CURRENT_SOURCE_DIR}/lwip/tcp_bound_mss_patch.cmake")
+file(SHA256 "${WW_LWIP_TCP_BOUND_MSS_RECIPE}" WW_LWIP_TCP_BOUND_MSS_RECIPE_SHA256)
+include("${WW_LWIP_TCP_BOUND_MSS_RECIPE}")
 set(WW_LWIP_EXPECTED_PATCH_STAMP
-    "revision=${WW_LWIP_REVISION}\nrecipe-sha256=${WW_LWIP_PATCH_RECIPE_SHA256}\nengine-sha256=${WW_LWIP_ENGINE_RECIPE_SHA256}\npools-sha256=${WW_LWIP_POOLS_RECIPE_SHA256}\nports-sha256=${WW_LWIP_PORTS_RECIPE_SHA256}\ntimer-sha256=${WW_LWIP_TIMER_RECIPE_SHA256}\nlifecycle-sha256=${WW_LWIP_LIFECYCLE_RECIPE_SHA256}\nchecksum-sha256=${WW_LWIP_CHECKSUM_RECIPE_SHA256}\nack-batch-sha256=${WW_LWIP_ACK_BATCH_RECIPE_SHA256}\nreceive-budget-sha256=${WW_LWIP_RECEIVE_BUDGET_RECIPE_SHA256}\ntcp-output-tail-sha256=${WW_LWIP_TCP_OUTPUT_TAIL_RECIPE_SHA256}\ntcp-timestamps-sha256=${WW_LWIP_TCP_TIMESTAMPS_RECIPE_SHA256}\n")
+    "revision=${WW_LWIP_REVISION}\nupstream-tcp-input-sha256=${WW_LWIP_UPSTREAM_TCP_INPUT_RECIPE_SHA256}\nrecipe-sha256=${WW_LWIP_PATCH_RECIPE_SHA256}\nengine-sha256=${WW_LWIP_ENGINE_RECIPE_SHA256}\npools-sha256=${WW_LWIP_POOLS_RECIPE_SHA256}\nports-sha256=${WW_LWIP_PORTS_RECIPE_SHA256}\ntimer-sha256=${WW_LWIP_TIMER_RECIPE_SHA256}\nlifecycle-sha256=${WW_LWIP_LIFECYCLE_RECIPE_SHA256}\nchecksum-sha256=${WW_LWIP_CHECKSUM_RECIPE_SHA256}\nack-batch-sha256=${WW_LWIP_ACK_BATCH_RECIPE_SHA256}\nreceive-budget-sha256=${WW_LWIP_RECEIVE_BUDGET_RECIPE_SHA256}\ntcp-output-tail-sha256=${WW_LWIP_TCP_OUTPUT_TAIL_RECIPE_SHA256}\ntcp-timestamps-sha256=${WW_LWIP_TCP_TIMESTAMPS_RECIPE_SHA256}\n")
+
+string(APPEND WW_LWIP_EXPECTED_PATCH_STAMP "tcp-bound-mss-sha256=${WW_LWIP_TCP_BOUND_MSS_RECIPE_SHA256}\n")
 
 set(WW_LWIP_REBUILD TRUE)
 if(EXISTS "${WW_LWIP_PATCH_STAMP}")
@@ -1261,6 +1271,7 @@ if(WW_LWIP_REBUILD)
     file(REMOVE_RECURSE "${LWIP_DIR}")
     file(MAKE_DIRECTORY "${LWIP_DIR}")
     file(COPY "${LWIP_ORIGINAL_DIR}/" DESTINATION "${LWIP_DIR}" PATTERN ".git" EXCLUDE)
+    ww_apply_lwip_upstream_tcp_input_patch("${LWIP_DIR}")
     ww_apply_lwip_pretend_patch("${LWIP_DIR}")
     ww_apply_lwip_engine_patch("${LWIP_DIR}")
     ww_apply_lwip_shared_pools_patch("${LWIP_DIR}")
@@ -1272,6 +1283,7 @@ if(WW_LWIP_REBUILD)
     ww_apply_lwip_receive_budget_patch("${LWIP_DIR}")
     ww_apply_lwip_tcp_output_tail_patch("${LWIP_DIR}")
     ww_apply_lwip_tcp_timestamps_patch("${LWIP_DIR}")
+    ww_apply_lwip_tcp_bound_mss_patch("${LWIP_DIR}")
     file(WRITE "${WW_LWIP_PATCH_STAMP}" "${WW_LWIP_EXPECTED_PATCH_STAMP}")
 endif()
 
@@ -1869,7 +1881,19 @@ if(NOT MSVC)
     endif()
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "SunOS")
+    # illumos exposes the ancillary-data msghdr ABI under X/Open and the
+    # packet-info structures under extensions. Select both before any header.
+    set_source_files_properties(event/nio.c event/udp_send.c PROPERTIES
+        COMPILE_DEFINITIONS "_XOPEN_SOURCE=700;__EXTENSIONS__=1"
+        SKIP_PRECOMPILE_HEADERS ON
+        SKIP_UNITY_BUILD_INCLUSION ON)
+    target_link_libraries(ww PRIVATE socket)
+endif()
+
 if(APPLE)
+    # Select the IPv6 packet-info API before any socket header in a unity build.
+    target_compile_definitions(ww PRIVATE __APPLE_USE_RFC_3542=1)
     # AppleClang consumers need the same narrowing-warning suppression as Clang consumers.
     target_compile_options(ww PUBLIC -Wno-shorten-64-to-32)
     target_compile_options(ww PRIVATE -Wno-unused-command-line-argument)

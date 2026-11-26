@@ -25,7 +25,9 @@ void pipetunnelDestroy(tunnel_t *t, const ww_lifecycle_context_t *context);
 /**
  * @brief Pipe to a specific WID.
  * Copies ingress metadata, the source line's current mark and destination transport
- * offer before destination-worker Init.
+ * offer before destination-worker Init. An outstanding Pause from the source
+ * transport continues to hold traffic returning to it. Each receiving worker
+ * retains payload for its paused direction in FIFO order until Resume.
  *
  * @param t Pointer to the tunnel.
  * @param l Pointer to the line.

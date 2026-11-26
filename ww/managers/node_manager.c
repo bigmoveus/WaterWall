@@ -474,7 +474,9 @@ void nodemanagerInitializeLineOnTargetWorker(void *worker, void *_tunnel, void *
 
     assert(lineIsOnCurrentWorker(line));
 
-    if (! lineCallWithRef(line, tunnelNextUpStreamInit, tunnel))
+    const LineTaskFnNoBuf init =
+        (tunnel->node->flags & kNodeFlagHandlesPacketHeadInit) != 0 ? tunnelUpStreamInit : tunnelNextUpStreamInit;
+    if (! lineCallWithRef(line, init, tunnel))
     {
         /*
          * Category D: a persistent worker packet line is process-lifetime state
@@ -515,14 +517,12 @@ static bool initializePacketTunnels(node_manager_config_t *cfg)
     {
         tunnel_chain_t *chain = *chain_ref.ref;
         assert(chain != NULL);
-        if (chain->tunnels.len == 0 || chain->packet_chain_init_sent)
+        if (chain->tunnels.len == 0)
         {
             continue;
         }
 
         assert(chain->layer_solution_ready);
-        bool admitted_any_head = false;
-
         for (uint16_t ti = 0; ti < chain->tunnels.len; ++ti)
         {
             if (! tunnelIsManagerPacketInitHead(chain, ti))
@@ -544,15 +544,6 @@ static bool initializePacketTunnels(node_manager_config_t *cfg)
                     return false;
                 }
             }
-            admitted_any_head = true;
-        }
-
-        if (admitted_any_head)
-        {
-            /* Worker loops are still behind workers_run_flag, so publication
-             * follows complete admission while execution remains deferred
-             * until after every prepare/start hook. */
-            chain->packet_chain_init_sent = true;
         }
     }
     return true;

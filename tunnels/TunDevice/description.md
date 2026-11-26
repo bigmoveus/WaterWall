@@ -36,6 +36,10 @@ For Ping or Ping6 tunnels, see the
 
 Payload coming from either side and reaching `TunDevice` is written into the TUN interface.
 
+The [WireGuard packet tunnel example](https://radkesvat.github.io/WaterWall-Docs/docs/examples/tunnels/wireguard)
+shows both hosts and places the server's TUN at the end of
+`UdpListener -> WireGuardServer(mode=packet) -> TunDevice`.
+
 ## Minimal practical example
 
 Node fragment; define the referenced neighbors and peers in the same deployment.
@@ -176,6 +180,13 @@ See [Configuration](#configuration) for defaults and conditional requirements an
 
   Default: `false`
 
+- `windows-kill-switch-owner` `(boolean, default false)`
+  In a protected Windows run, set this to `true` on one owned, full-route IPv4
+  TunDevice when several qualify across the loaded configuration files. With a
+  single eligible TunDevice, omit the setting for automatic selection. Omitting
+  it or setting it to `false` leaves the device eligible for automatic selection.
+  The core setting `"windows-kill-switch": true` enables protection.
+
 - `route-cidrs` `(array of strings)`
   IPv4 CIDRs to route toward the TUN interface when routing is enabled.
 
@@ -292,9 +303,12 @@ RawSocket -> PingServer -> TunDevice
 
 The resolved mode is fixed per device generation, including single-queue fallback
 and restart; readers do not inspect traffic or reevaluate topology per packet.
-Ping and Ping6 pass unrelated packets through, so automatic `peer` groups unrelated
-opaque traffic as well; mixed traffic may require an explicit setting. Startup
-logs requested mode, effective mode, selection reason and effective queue count.
+The IPv4 Ping decoder drops packets that fail its carrier checks. Ping6 forwards
+valid, unfragmented IPv4 packets with a protocol other than its configured
+carrier protocol. With Ping6, automatic `peer` mode groups this unrelated
+opaque traffic by address pair and protocol. For mixed traffic, select an
+explicit mode if a different distribution is needed. Startup logs the requested
+mode, effective mode, selection reason and effective queue count.
 
 #### `fragment-policy` (optional, default: `reassemble`)
 
@@ -454,6 +468,16 @@ c-ares DNS resolver sockets are not pinned by this feature. The default
 interface is detected once at startup; if the physical default route changes,
 restart WaterWall or configure explicit interfaces/routes.
 
+In a packed Windows run with the kill switch armed, the launcher chooses the
+physical IPv4 default route with the lowest combined route and interface metric
+among connected physical interfaces. Participating sockets use that
+interface even when `loop-protection` is disabled. An explicit adapter
+`interface` must identify the approved interface. The launcher authorizes the
+owner's live Wintun identity before its address and routes are installed.
+Owner selection controls the firewall grant. Windows still chooses routes
+using the prefixes and metrics of all configured adapters. Restart the
+protected run after changing the physical uplink.
+
 On Windows, automatic loop prevention only selects the interface for participating
 sockets; it does not add physical-interface host routes. The built-in TUN IP,
 route, and DNS settings target the owned adapter. Process termination,
@@ -474,15 +498,20 @@ See the [restart flow](../../core/tools/windows_launcher/LIFECYCLE.md#restart-af
 
 ### Using TunDevice with Ping and Ping6
 
-For Ping/Ping6 paths that rewrite addresses, place IpOverrider between RawSocket
-and the decoder and select `"opaque-flow-mode": "peer"` explicitly; `auto`
-recognizes only direct decoder neighbours. All Ping modes reuse the IPv4 header.
-Ordinary Ping and direct Ping6 add nine bytes and accept at most 1491 complete
-native bytes; `ipv6-in-ipv4` Ping6 adds 49 and accepts at most 1451. Both entry
-points reject fragments. Configure `"fragment-policy": "reassemble"` on adapters
-and budget device/bridge MTUs for the actual path. Capture the peer's network
-address with protocol 1 for Ping, 58 for direct Ping6 or 41 for IPv6-in-IPv4 Ping6. Ordinary Echo traffic may
-satisfy the layout; dedicated capture selection supplies no authentication.
+Ping reuses the IPv4 header and adds 10 bytes, leaving room for a 1,490-byte
+native packet at the 1,500-byte carrier ceiling. Use IpOverrider if the
+native and carrier addresses differ. Capture the intended peer's wire source
+address with `capture-protocols: [1]`. Unrelated ICMP can match Ping framing.
+
+Ping6 direct mode adds 9 bytes and accepts 1,491 native bytes. Ping6
+`ipv6-in-ipv4` adds 49 bytes and accepts 1,451. Capture the peer's source
+address with protocol 58 or 41 respectively for Ping6.
+
+With IpOverrider between RawSocket and either decoder, set
+`"opaque-flow-mode": "peer"` explicitly if you want peer-based worker
+placement. The `auto` mode recognizes direct decoder neighbors. Configure
+`"fragment-policy": "reassemble"` on packet adapters and budget the device
+or bridge MTU for the actual path.
 
 ## Implementation details
 

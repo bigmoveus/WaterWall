@@ -8,7 +8,6 @@
 #define WIREGUARDIF_DEFAULT_PORT      (51820)
 #define WIREGUARDIF_KEEPALIVE_DEFAULT (0xFFFF)
 
-#define WIREGUARD_MAX_PEERS   32
 #define WIREGUARD_MAX_SRC_IPS 16
 
 // Per device limit on accepting (valid) initiation requests - per peer
@@ -37,6 +36,8 @@
 #define REKEY_AFTER_TIME      (120)
 #define REJECT_AFTER_TIME     (180)
 #define REKEY_TIMEOUT         (5)
+#define REKEY_TIMEOUT_JITTER_MS (333U)
+#define REKEY_ATTEMPT_TIME      (90)
 #define KEEPALIVE_TIMEOUT     (10)
 
 #define SYSTEM_LOAD_THRESHOULD (0.9)
@@ -47,4 +48,4 @@
 #define MESSAGE_COOKIE_REPLY         3
 #define MESSAGE_TRANSPORT_DATA       4
 
-#define WIREGUARDIF_INVALID_INDEX (0xFF)
+#define WIREGUARDIF_INVALID_INDEX SIZE_MAX

@@ -83,6 +83,7 @@ void                          testTeardownCleanupCannotReadmitMessages(void);
 void                          testPipeToRejectsBadWorkers(void);
 void                          testPipePublicationIsLinearizedWithPreStop(void);
 void                          testPipePayloadFinishLateAndRefused(void);
+void                          testPipePausedReceiverReplay(void);
 void                          testHalfDuplexWorkers(void);
 void                          testConnectionStripeWorkers(void);
 const ww_lifecycle_context_t *testShutdownContext(void);

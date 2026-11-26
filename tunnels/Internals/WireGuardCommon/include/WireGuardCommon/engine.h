@@ -3,9 +3,18 @@
 #include "wireguard_types.h"
 #include "wwapi.h"
 
-/* Initialize before publication; all subsequent processing has one worker owner. */
+/* Cached milliseconds on the engine's owner loop. Subtract unsigned timestamps across tick wrap. */
+static inline uint32_t wireguardRecoveryNow(void)
+{
+    return (uint32_t) wloopNowMonotonicMS(getCurrentWorkerLoop());
+}
+
+/* Initialize fresh storage before publication. Destroy the device before initializing it again.
+ * All subsequent processing has one worker owner. */
 bool wireguardCommonInit(wireguard_device_t *device, const char *private_key, void *context,
                          wireguard_callbacks_t callbacks);
+/* Apply the node's inner MTU to an initialized engine before starting packet processing. */
+bool wireguardCommonConfigureMtu(wireguard_device_t *device, const cJSON *settings);
 /* Each input is consumed on all paths. No engine locks or neighbour callbacks
  * under locks: wrappers marshal processing to their designated event worker. */
 void wireguardCommonReceive(wireguard_device_t *device, sbuf_t *packet, const ip_addr_t *source, uint16_t port);
@@ -16,14 +25,16 @@ void wireguardCommonReceive(wireguard_device_t *device, sbuf_t *packet, const ip
  * (source NULL, port zero) through the same carrier. Input is always consumed. */
 void              wireguardCommonReceiveOnCarrier(wireguard_device_t *device, sbuf_t *packet, uint64_t carrier_id);
 void              wireguardCommonSendInner(wireguard_device_t *device, sbuf_t *packet);
+bool              wireguardCommonPeerCanSend(wireguard_peer_t *peer);
+/* Explicit new outbound demand renews the retry window and observes the initiation rate limit. */
+void              wireguardCommonRequestHandshake(wireguard_device_t *device, wireguard_peer_t *peer);
 wireguard_peer_t *wireguardCommonPeerForIp(wireguard_device_t *device, const ip_addr_t *ip);
 bool              wireguardCommonPeerAllowsIp(const wireguard_peer_t *peer, const ip_addr_t *ip);
 sbuf_t *wireguardCommonDecrypt(buffer_pool_t *pool, const uint8_t *ciphertext, uint32_t length, uint64_t nonce,
                                wireguard_keypair_t *keypair);
 /* Static peer settings: publickey, allowedips, optional presharedkey and
  * persistentkeepalive. Endpoint ownership belongs to each public wrapper. */
-bool wireguardCommonAddConfiguredPeer(wireguard_device_t *device, const cJSON *settings, uint8_t *index);
-bool wireguardCommonRangesOverlap(const wireguard_allowed_ip_t *a, const wireguard_allowed_ip_t *b);
+bool wireguardCommonAddConfiguredPeer(wireguard_device_t *device, const cJSON *settings, size_t *index);
 
 /***************************************** WireGuard Interface ****************************************** */
 
@@ -33,37 +44,38 @@ void wireguardCommonLoop(wireguard_device_t *device);
 // Helper to initialise the peer struct with defaults
 void wireguardifPeerInit(wireguard_peer_init_data_t *peer);
 
-// Add a new peer to the specified interface - see wireguard.h for maximum number of peers allowed
+// Add a new peer to the specified interface.
 // On success the peer_index can be used to reference this peer in future function calls
-err_t wireguardifAddPeer(wireguard_device_t *device, wireguard_peer_init_data_t *peer, uint8_t *peer_index);
-err_t wireguardifAddAllowedIp(wireguard_device_t *device, uint8_t peer_index, const ip_addr_t *ip,
+err_t wireguardifAddPeer(wireguard_device_t *device, wireguard_peer_init_data_t *peer, size_t *peer_index);
+/* Adding a range (including a new peer's first range) returns ERR_ARG for an
+ * invalid address/mask pair and ERR_MEM when a new valid range cannot fit. */
+err_t wireguardifAddAllowedIp(wireguard_device_t *device, size_t peer_index, const ip_addr_t *ip,
                               const ip_addr_t *mask);
 
 // Remove the given peer from the network interface
-err_t wireguardifRemovePeer(wireguard_device_t *device, uint8_t peer_index);
+err_t wireguardifRemovePeer(wireguard_device_t *device, size_t peer_index);
 
 // Stop trying to connect to the given peer
-err_t wireguardifDisconnect(wireguard_device_t *device, uint8_t peer_index);
+err_t wireguardifDisconnect(wireguard_device_t *device, size_t peer_index);
 
 err_t wireguardifStartHandshake(wireguard_device_t *device, wireguard_peer_t *peer, bool force);
-err_t wireguardifRetryHandshake(wireguard_device_t *device, wireguard_peer_t *peer);
-err_t wireguardifPeerOutput(wireguard_device_t *device, sbuf_t *q, wireguard_peer_t *peer);
+err_t wireguardifPeerOutput(wireguard_device_t *device, sbuf_t *q, wireguard_peer_t *peer, bool data);
 err_t wireguardifDeviceOutput(wireguard_device_t *device, sbuf_t *q, const ip_addr_t *ipaddr, uint16_t port);
-void  wireguardifSendKeepalive(wireguard_device_t *device, wireguard_peer_t *peer);
+err_t wireguardifSendKeepalive(wireguard_device_t *device, wireguard_peer_t *peer);
 err_t wireguardifOutputToPeer(wireguard_device_t *device, sbuf_t *q, const ip_addr_t *ipaddr, wireguard_peer_t *peer);
 
 /***************************************** WireGuard Device ****************************************** */
 
 WCRYPTO_MUST_USE wcrypto_status_t wireguardInit(void);
-bool                              wireguardDeviceInit(wireguard_device_t *device, const uint8_t *private_key);
-void                              wireguardDeviceDestroy(wireguard_device_t *device);
-bool wireguardPeerInit(wireguard_device_t *device, wireguard_peer_t *peer, const uint8_t *public_key,
-                       const uint8_t *preshared_key);
-
-wireguard_peer_t *peerAlloc(wireguard_device_t *device);
-uint8_t           wireguardPeerIndex(wireguard_device_t *device, wireguard_peer_t *peer);
-wireguard_peer_t *peerLookupByPubkey(wireguard_device_t *device, uint8_t *public_key);
-wireguard_peer_t *peerLookupByPeerIndex(wireguard_device_t *device, uint8_t peer_index);
+/* Initialize fresh or previously destroyed storage. The input may be device->private_key.
+ * Both outcomes permit destruction. */
+bool wireguardDeviceInit(wireguard_device_t *device, const uint8_t *private_key);
+void wireguardDeviceDestroy(wireguard_device_t *device);
+/* Peer pointers and local ids remain stable while registered. */
+wireguard_peer_t *wireguardPeerCreate(wireguard_device_t *device, const uint8_t *public_key,
+                                      const uint8_t *preshared_key);
+wireguard_peer_t *peerLookupByPubkey(wireguard_device_t *device, const uint8_t *public_key);
+wireguard_peer_t *peerLookupByPeerIndex(wireguard_device_t *device, size_t peer_index);
 wireguard_peer_t *peerLookupByReceiver(wireguard_device_t *device, uint32_t receiver);
 wireguard_peer_t *peerLookupByHandshake(wireguard_device_t *device, uint32_t receiver);
 wireguard_peer_t *peerLookupByPendingHandshake(wireguard_device_t *device, uint32_t receiver);
@@ -79,8 +91,8 @@ uint8_t              wireguardGetMessageType(const uint8_t *data, size_t len);
 wireguard_peer_t *wireguardProcessInitiationMessage(wireguard_device_t *device, message_handshake_initiation_t *msg);
 bool              wireguardProcessHandshakeResponse(wireguard_device_t *device, wireguard_peer_t *peer,
                                                     message_handshake_response_t *src);
-bool wireguardProcessCookieMessage(wireguard_device_t *device, wireguard_peer_t *peer, message_cookie_reply_t *src);
-bool wireguardStorePendingHandshake(wireguard_peer_t *peer, const void *packet, size_t packet_len);
+bool              wireguardProcessCookieMessage(wireguard_peer_t *peer, const message_cookie_reply_t *src);
+void wireguardStorePendingHandshake(wireguard_peer_t *peer, uint8_t message_type, uint32_t sender, const uint8_t *mac1);
 void wireguardClearPendingHandshake(wireguard_peer_t *peer);
 void wireguardClearHandshakeState(wireguard_peer_t *peer);
 
@@ -96,6 +108,15 @@ bool wireguardCheckMac2(wireguard_device_t *device, const uint8_t *data, size_t 
                         size_t source_length, const uint8_t *mac2);
 
 bool wireguardExpired(uint32_t created_millis, uint32_t valid_seconds);
+
+static inline void wireguardRequestRekeyAtAge(wireguard_peer_t *peer, wireguard_keypair_t *key, uint32_t age_seconds)
+{
+    if (! key->age_rekey_requested && wireguardExpired(key->keypair_millis, age_seconds))
+    {
+        key->age_rekey_requested = true;
+        peer->send_handshake     = true;
+    }
+}
 
 WCRYPTO_MUST_USE bool wireguardEncryptPacket(uint8_t *dst, size_t dst_capacity, const uint8_t *src, size_t src_len,
                                              wireguard_keypair_t *keypair);

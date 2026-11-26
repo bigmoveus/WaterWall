@@ -1,6 +1,6 @@
-/* Cross-worker pipe publication, private-pipe byte/identity transfer, refusal/late-dispatch cancellation and exact
- * borrowed/owned line settlement. Source lines are fixture-owned; companions are pipe-owned normal lines. CTest:
- * waterwall.worker_context_helpers_unit; see the driver for ordering and CLI. */
+/* Cross-worker pipe publication, private-pipe byte/identity transfer, paused receiver replay, cancellation,
+ * and exact line settlement. Source lines are fixture-owned; companions are pipe-owned normal lines.
+ * CTest: waterwall.worker_context_helpers_unit; see the driver for ordering and CLI. */
 #include "fixtures/protocols/splice_source.h"
 #include "worker_fixture.h"
 
@@ -582,7 +582,13 @@ typedef struct pipe_message_case_fixture_s
     line_t         *owned;
 } pipe_message_case_fixture_t;
 
-static void pipeMessageCaseSetup(pipe_message_case_fixture_t *fixture)
+static void pipeRequireLiveSource(tunnel_t *t, line_t *line)
+{
+    discard t;
+    require(lineIsAlive(line), "queued pressure crossed into a normally retired source");
+}
+
+static void pipeMessageCaseSetup(pipe_message_case_fixture_t *fixture, bool paused_before_pipe)
 {
     memoryZero(fixture, sizeof(*fixture));
     atomicStoreRelaxed(&g_pipe_init_count, 0);
@@ -619,8 +625,16 @@ static void pipeMessageCaseSetup(pipe_message_case_fixture_t *fixture)
     fixture->wrapper->onStart(fixture->wrapper);
 
     fixture->borrowed = pipeTestCreateSourceLine(fixture->chain);
-    require(fixture->borrowed != NULL && pipeTo(fixture->child, fixture->borrowed, 1),
-            "failed to publish the pipe message pair");
+    if (paused_before_pipe)
+    {
+        fixture->child->fnInitU   = pipeRequireLiveSource;
+        fixture->child->fnPauseU  = pipeRequireLiveSource;
+        fixture->child->fnResumeU = pipeRequireLiveSource;
+        fixture->wrapper->fnInitU(fixture->wrapper, fixture->borrowed);
+        fixture->wrapper->fnPauseU(fixture->wrapper, fixture->borrowed);
+        fixture->child->fnInitU = pipeTestOwnedInit;
+    }
+    require(pipeTo(fixture->child, fixture->borrowed, 1), "failed to publish the pipe message pair");
     for (uint32_t attempt = 0; attempt < 5000 && atomicLoadRelaxed(&g_pipe_init_count) != 1; ++attempt)
     {
         wwSleepMS(1);
@@ -680,7 +694,7 @@ static void pipeBlockingBarrier(worker_t *worker, void *arg1, void *arg2, void *
 static void pipeRunRefusalCase(bool upstream, bool finish, worker_message_enqueue_test_failure_e failure)
 {
     pipe_message_case_fixture_t fixture;
-    pipeMessageCaseSetup(&fixture);
+    pipeMessageCaseSetup(&fixture, false);
     atomicStoreRelaxed(&g_pipe_shutdown_requests, 0);
 
     pipe_payload_lifetime_t lifetime;
@@ -730,7 +744,7 @@ static void pipeRunRefusalCase(bool upstream, bool finish, worker_message_enqueu
 static void pipeRunAdmittedLateCase(bool upstream, bool finish)
 {
     pipe_message_case_fixture_t fixture;
-    pipeMessageCaseSetup(&fixture);
+    pipeMessageCaseSetup(&fixture, false);
 
     pipe_payload_lifetime_t lifetime;
     sbuf_t                 *payload = finish ? NULL : pipeTestPayload(&lifetime);
@@ -822,20 +836,17 @@ static void pipeRequirePayloadBeforeBorrowedFinish(tunnel_t *t, line_t *line)
     pipeTestBorrowedFinish(t, line);
 }
 
-static void pipeUnexpectedPause(tunnel_t *t, line_t *line)
+/* Signals travel back from the worker that owns the receiving line. */
+static void pipeSetReceiverPaused(void *worker, void *arg1, void *arg2, void *arg3)
 {
-    discard t;
-    discard line;
-    require(false, "queued Pause crossed into a normally retired source");
-}
-
-static void pipePostDownstreamPause(void *worker, void *arg1, void *arg2, void *arg3)
-{
-    discard                      worker;
-    discard                      arg2;
     discard                      arg3;
     pipe_message_case_fixture_t *fixture = arg1;
-    fixture->wrapper->fnPauseD(fixture->wrapper, fixture->owned);
+    tunnel_t                    *wrapper = fixture->wrapper;
+    const bool                   paused  = arg2 != NULL;
+    if (((worker_t *) worker)->wid == 0)
+        (paused ? wrapper->fnPauseU : wrapper->fnResumeU)(wrapper, fixture->borrowed);
+    else
+        (paused ? wrapper->fnPauseD : wrapper->fnResumeD)(wrapper, fixture->owned);
 }
 
 static void pipeFinishDownstreamSource(void *worker, void *arg1, void *arg2, void *arg3)
@@ -864,24 +875,38 @@ static void pipeWaitForQueue(wid_t wid)
     waitForAtomicBool(&done, "source-close completion missing");
 }
 
+static void pipeOnWorker(wid_t wid, WorkerMessageCallback callback, void *arg1, void *arg2)
+{
+    if (wid == 0)
+        callback(getWorker(0), arg1, arg2, NULL);
+    else
+    {
+        require(sendWorkerMessageForceQueueWithCleanup(wid, callback, NULL, arg1, arg2, NULL),
+                "pipe test worker callback refused");
+        pipeWaitForQueue(wid);
+    }
+}
+
 static void pipeRunQueuedSourceClose(bool upstream)
 {
     pipe_message_case_fixture_t fixture;
-    pipeMessageCaseSetup(&fixture);
+    pipeMessageCaseSetup(&fixture, false);
     pipe_payload_lifetime_t lifetime;
     sbuf_t                 *payload = pipeTestPayload(&lifetime);
     pipe_blocking_barrier_t barrier = {0};
 
     if (upstream)
     {
-        fixture.previous->fnPauseD = pipeUnexpectedPause;
-        fixture.child->fnFinU      = pipeRequirePayloadBeforeOwnedFinish;
-        require(sendWorkerMessageForceQueueWithCleanup(1, pipePostDownstreamPause, NULL, &fixture, NULL, NULL),
+        fixture.previous->fnPauseD  = pipeRequireLiveSource;
+        fixture.previous->fnResumeD = pipeRequireLiveSource;
+        fixture.child->fnFinU       = pipeRequirePayloadBeforeOwnedFinish;
+        require(sendWorkerMessageForceQueueWithCleanup(1, pipeSetReceiverPaused, NULL, &fixture, &fixture, NULL),
                 "downstream Pause driver refused");
     }
     else
     {
-        fixture.child->fnPauseU  = pipeUnexpectedPause;
+        fixture.child->fnPauseU  = pipeRequireLiveSource;
+        fixture.child->fnResumeU = pipeRequireLiveSource;
         fixture.previous->fnFinD = pipeRequirePayloadBeforeBorrowedFinish;
     }
     require(sendWorkerMessageForceQueueWithCleanup(
@@ -898,6 +923,11 @@ static void pipeRunQueuedSourceClose(bool upstream)
         pipeWaitForQueue(0); // Dispatch the reverse Pause after source detach, while worker 1 is blocked.
         atomicStoreExplicit(&barrier.release, true, memory_order_release);
         pipeWaitForQueue(1);
+        require(atomicLoadRelaxed(&g_pipe_owned_payload_count) == 0 &&
+                    atomicLoadRelaxed(&g_pipe_owned_finish_count) == 0,
+                "source Finish bypassed the paused upstream receiver");
+        pipeOnWorker(1, pipeSetReceiverPaused, &fixture, NULL);
+        pipeWaitForQueue(0);
 
         require(atomicLoadRelaxed(&g_pipe_owned_payload_count) == 1 &&
                     atomicLoadRelaxed(&g_pipe_owned_finish_count) == 1 &&
@@ -915,6 +945,11 @@ static void pipeRunQueuedSourceClose(bool upstream)
         atomicStoreExplicit(&barrier.release, true, memory_order_release);
         pipeWaitForQueue(1); // The queued Pause follows source detach while worker 0 has yet to dispatch.
         pipeWaitForQueue(0);
+        require(atomicLoadRelaxed(&g_pipe_borrowed_payload_count) == 0 &&
+                    atomicLoadRelaxed(&g_pipe_borrowed_finish_count) == 0,
+                "source Finish bypassed the paused downstream receiver");
+        pipeOnWorker(0, pipeSetReceiverPaused, &fixture, NULL);
+        pipeWaitForQueue(1);
 
         require(atomicLoadRelaxed(&g_pipe_borrowed_payload_count) == 1 &&
                     atomicLoadRelaxed(&g_pipe_borrowed_finish_count) == 1 &&
@@ -930,6 +965,204 @@ static void pipeRunQueuedSourceClose(bool upstream)
     tunnelchainDestroy(fixture.chain);
     pipetunnelDestroy(fixture.wrapper, testShutdownContext());
     tunnelDestroy(fixture.previous);
+}
+
+static atomic_uint g_pipe_pressure_pauses;
+static atomic_uint g_pipe_pressure_resumes;
+static atomic_uint g_pipe_pressure_received;
+
+static void pipePressurePause(tunnel_t *t, line_t *line)
+{
+    discard t;
+    require(currentThreadOwnsWorker(lineGetWID(line)), "pipe Pause reached the wrong worker");
+    atomicAddExplicit(&g_pipe_pressure_pauses, 1, memory_order_relaxed);
+}
+
+static void pipePressureResume(tunnel_t *t, line_t *line)
+{
+    discard t;
+    require(currentThreadOwnsWorker(lineGetWID(line)), "pipe Resume reached the wrong worker");
+    require(atomicLoadRelaxed(&g_pipe_pressure_received) == 4,
+            "producer resumed before its receiver replayed the FIFO");
+    atomicAddExplicit(&g_pipe_pressure_resumes, 1, memory_order_relaxed);
+}
+
+/* Pause during the first delivery, then re-pause during the first replay. */
+static void pipePressureReceive(tunnel_t *t, line_t *line, sbuf_t *buf)
+{
+    require(currentThreadOwnsWorker(lineGetWID(line)), "pipe Payload reached the wrong worker");
+    const unsigned sequence = atomicAddExplicit(&g_pipe_pressure_received, 1, memory_order_relaxed) + 1;
+    require(sbufGetLength(buf) == 1 && sbufGetRawPtr(buf)[0] == sequence, "pipe replay changed FIFO order");
+    sbufDestroy(buf);
+    if (sequence <= 2)
+    {
+        if (lineGetWID(line) == 0)
+            tunnelNextUpStreamPause(t, line);
+        else
+            tunnelPrevDownStreamPause(t, line);
+    }
+}
+
+static void pipeSendNumberedBuffers(void *worker, void *arg1, void *arg2, void *arg3)
+{
+    discard                      arg3;
+    pipe_message_case_fixture_t *fixture = arg1;
+    const unsigned              *range   = arg2;
+    for (unsigned i = range[0]; i <= range[1]; ++i)
+    {
+        sbuf_t *buf = sbufCreate(1);
+        sbufSetLength(buf, 1);
+        sbufGetMutablePtr(buf)[0] = (uint8_t) i;
+        if (((worker_t *) worker)->wid == 0)
+            fixture->wrapper->fnPayloadU(fixture->wrapper, fixture->borrowed, buf);
+        else
+            fixture->wrapper->fnPayloadD(fixture->wrapper, fixture->owned, buf);
+    }
+}
+
+static void pipeRunReceiverReplay(bool upstream)
+{
+    pipe_message_case_fixture_t fixture;
+    pipeMessageCaseSetup(&fixture, false);
+    atomicStoreRelaxed(&g_pipe_pressure_pauses, 0);
+    atomicStoreRelaxed(&g_pipe_pressure_resumes, 0);
+    atomicStoreRelaxed(&g_pipe_pressure_received, 0);
+    if (upstream)
+    {
+        fixture.child->fnPayloadU   = pipePressureReceive;
+        fixture.previous->fnPauseD  = pipePressurePause;
+        fixture.previous->fnResumeD = pipePressureResume;
+    }
+    else
+    {
+        fixture.previous->fnPayloadD = pipePressureReceive;
+        fixture.child->fnPauseU      = pipePressurePause;
+        fixture.child->fnResumeU     = pipePressureResume;
+    }
+
+    const wid_t sender   = upstream ? 0 : 1;
+    const wid_t receiver = upstream ? 1 : 0;
+    /* Queue every initial buffer before the receiver has a chance to report pressure. Worker 0 only
+     * dispatches when the test drives its loop; worker 1 needs an explicit gate. */
+    pipe_blocking_barrier_t barrier = {0};
+    if (upstream)
+    {
+        require(sendWorkerMessageForceQueueWithCleanup(
+                    1, (WorkerMessageCallback) pipeBlockingBarrier, NULL, &barrier, NULL, NULL),
+                "pipe replay barrier refused");
+        waitForAtomicBool(&barrier.entered, "pipe replay barrier not entered");
+    }
+    unsigned initial[] = {1, 3};
+    pipeOnWorker(sender, pipeSendNumberedBuffers, &fixture, initial);
+    if (upstream)
+        atomicStoreExplicit(&barrier.release, true, memory_order_release);
+    pipeWaitForQueue(receiver);
+    require(atomicLoadRelaxed(&g_pipe_pressure_received) == 1,
+            "messages already in flight bypassed the receiver Pause");
+
+    if (upstream)
+        require(atomicLoadRelaxed(&g_pipe_pressure_pauses) == 0, "sender unexpectedly dispatched its queued Pause");
+    unsigned last[] = {4, 4};
+    pipeOnWorker(sender, pipeSendNumberedBuffers, &fixture, last);
+    require(atomicLoadRelaxed(&g_pipe_pressure_pauses) != 0,
+            "sending another buffer missed the receiver's early Pause");
+    pipeWaitForQueue(receiver);
+    pipeWaitForQueue(sender);
+    require(atomicLoadRelaxed(&g_pipe_pressure_received) == 1, "a later message bypassed the parked FIFO");
+
+    pipeOnWorker(receiver, pipeSetReceiverPaused, &fixture, NULL);
+    pipeWaitForQueue(sender);
+    require(atomicLoadRelaxed(&g_pipe_pressure_received) == 2 && atomicLoadRelaxed(&g_pipe_pressure_resumes) == 0,
+            "a Pause from the replay callback failed to stop replay or released the producer");
+
+    pipeOnWorker(receiver, pipeSetReceiverPaused, &fixture, NULL);
+    if (upstream)
+    {
+        /* The previous Resume is queued on worker 0. Worker 1 reports fresh pressure before worker 0
+         * gets to act on it. No resume-and-immediately-pause may reach the producer. */
+        pipeOnWorker(receiver, pipeSetReceiverPaused, &fixture, &fixture);
+        pipeWaitForQueue(sender);
+        require(atomicLoadRelaxed(&g_pipe_pressure_resumes) == 0,
+                "stale Resume released the producer during a newer Pause");
+        pipeOnWorker(receiver, pipeSetReceiverPaused, &fixture, NULL);
+    }
+    pipeWaitForQueue(sender);
+    require(atomicLoadRelaxed(&g_pipe_pressure_received) == 4 && atomicLoadRelaxed(&g_pipe_pressure_resumes) == 1,
+            "the receiver did not replay every buffer and wake its idle producer once");
+    pipeMessageCaseDrainAndDestroy(&fixture);
+}
+
+static void pipeCloseDuringReplay(tunnel_t *t, line_t *line, sbuf_t *buf)
+{
+    require(currentThreadOwnsWorker(lineGetWID(line)), "pipe replay close ran on the wrong worker");
+    atomicAddExplicit(&g_pipe_owned_payload_count, 1, memory_order_relaxed);
+    sbufDestroy(buf);
+    tunnelPrevDownStreamFinish(t, line);
+}
+
+/* A retained splice body is released on receiver Finish during replay or worker stop. */
+static void pipeRunParkedReceiverClose(bool close_during_replay)
+{
+    pipe_message_case_fixture_t fixture;
+    pipeMessageCaseSetup(&fixture, false);
+    fixture.child->fnPayloadU   = pipeCloseDuringReplay;
+    fixture.previous->fnPauseD  = pipeRequireLiveSource;
+    fixture.previous->fnResumeD = pipeRequireLiveSource;
+    pipeOnWorker(1, pipeSetReceiverPaused, &fixture, &fixture);
+    pipeWaitForQueue(0);
+    pipe_payload_lifetime_t lifetime;
+    sbuf_t                 *first = sbufCreate(1);
+    sbufSetLength(first, 1);
+    fixture.wrapper->fnPayloadU(fixture.wrapper, fixture.borrowed, first);
+    fixture.wrapper->fnPayloadU(fixture.wrapper, fixture.borrowed, pipeTestPayload(&lifetime));
+    pipeWaitForQueue(1);
+    require(atomicLoadRelaxed(&g_pipe_owned_payload_count) == 0 && atomicLoadRelaxed(&lifetime.releases) == 0,
+            "paused receiver dispatched or released its parked payload");
+    if (close_during_replay)
+    {
+        pipeOnWorker(1, pipeSetReceiverPaused, &fixture, NULL);
+        pipeWaitForQueue(0);
+        require(atomicLoadRelaxed(&g_pipe_owned_payload_count) == 1 &&
+                    atomicLoadRelaxed(&g_pipe_borrowed_finish_count) == 1,
+                "receiver Finish during replay did not stop delivery and close its peer");
+    }
+    pipeMessageCaseDrainAndDestroy(&fixture);
+    require(atomicLoadRelaxed(&lifetime.releases) == 1,
+            "retired receiver did not release its parked tail exactly once");
+}
+
+static void pipeRunAlreadyPausedTransport(void)
+{
+    pipe_message_case_fixture_t fixture;
+    pipeMessageCaseSetup(&fixture, true);
+    /* The physical transport paused returning data before migration. Its upstream input must still
+     * reach the companion so that handshakes can finish and replies can be generated. */
+    pipe_payload_lifetime_t request;
+    fixture.wrapper->fnPayloadU(fixture.wrapper, fixture.borrowed, pipeTestPayload(&request));
+    pipeWaitForQueue(1);
+    require(atomicLoadRelaxed(&g_pipe_owned_payload_count) == 1 && atomicLoadRelaxed(&request.releases) == 1,
+            "pre-migration transport pressure blocked the other direction");
+
+    pipe_payload_lifetime_t reply;
+    pipe_down_call_t call = {.wrapper = fixture.wrapper, .line = fixture.owned, .payload = pipeTestPayload(&reply)};
+    pipeOnWorker(1, (WorkerMessageCallback) pipeDownCallOnWorker, &call, NULL);
+    pipeWaitForQueue(0);
+    require(atomicLoadRelaxed(&g_pipe_borrowed_payload_count) == 0 && atomicLoadRelaxed(&reply.releases) == 0,
+            "pipe delivered into a physical transport that paused before migration");
+    fixture.wrapper->fnResumeU(fixture.wrapper, fixture.borrowed);
+    pipeWaitForQueue(1);
+    require(atomicLoadRelaxed(&g_pipe_borrowed_payload_count) == 1 && atomicLoadRelaxed(&reply.releases) == 1,
+            "physical transport Resume failed to replay the companion reply");
+    pipeMessageCaseDrainAndDestroy(&fixture);
+}
+
+void testPipePausedReceiverReplay(void)
+{
+    pipeRunReceiverReplay(true);
+    pipeRunReceiverReplay(false);
+    pipeRunParkedReceiverClose(true);
+    pipeRunParkedReceiverClose(false);
+    pipeRunAlreadyPausedTransport();
 }
 
 void testPipePayloadFinishLateAndRefused(void)

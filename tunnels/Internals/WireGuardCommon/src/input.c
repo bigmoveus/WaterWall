@@ -1,4 +1,4 @@
-#include "WireGuardCommon/engine.h"
+#include "peer_store.h"
 
 #include "loggers/network_logger.h"
 
@@ -80,6 +80,10 @@ static bool updatePeerAddr(wireguard_device_t *device, wireguard_peer_t *peer, c
 {
     if (device->callbacks.authenticated != NULL && ! device->callbacks.authenticated(device->context, peer))
         return false;
+    if (! peer->valid)
+        return false;
+    ++peer->authenticated_receives;
+    peer->unanswered_interval_ms = 0;
     if (source->ip != NULL)
     {
         peer->ip   = *source->ip;
@@ -185,7 +189,6 @@ static void wireguardifProcessDataMessage(wireguard_device_t *device, wireguard_
     uint8_t             *src;
     sbuf_t              *buf = NULL;
     ip_addr_t            source;
-    uint32_t             now;
     uint16_t             packet_len = 0;
     uint32_t             idx        = data_hdr->receiver;
 
@@ -199,6 +202,7 @@ static void wireguardifProcessDataMessage(wireguard_device_t *device, wireguard_
     {
         // Reject-After-Time has passed for this keypair. Drop this packet and force a new handshake.
         keypairDestroy(keypair);
+        wireguardPeerSyncReceivers(peer);
         goto finish;
     }
 
@@ -220,15 +224,19 @@ static void wireguardifProcessDataMessage(wireguard_device_t *device, wireguard_
         if (! updatePeerAddr(device, peer, receive_source))
             goto finish;
 
-        now              = getTickMS();
-        keypair->last_rx = now;
-        peer->last_rx    = now;
+        keypair->sending_valid = true;
 
         if (UNLIKELY(peer->pending_handshake.valid &&
                      peer->pending_handshake.message_type == MESSAGE_HANDSHAKE_RESPONSE &&
                      peer->pending_handshake.sender == idx))
         {
             wireguardClearPendingHandshake(peer);
+        }
+
+        if (keypair == &peer->next_keypair)
+        {
+            peer->retry_handshake = false;
+            peer->send_handshake  = false;
         }
 
         // Might need to shuffle next key --> current keypair
@@ -240,14 +248,16 @@ static void wireguardifProcessDataMessage(wireguard_device_t *device, wireguard_
         device->status_connected = true;
 
         // Check to see if we should rekey
-        if (UNLIKELY(keypair->initiator &&
-                     wireguardExpired(keypair->keypair_millis, REJECT_AFTER_TIME - KEEPALIVE_TIMEOUT - REKEY_TIMEOUT)))
-        {
-            peer->send_handshake = true;
-        }
+        if (keypair->initiator)
+            wireguardRequestRekeyAtAge(peer, keypair, REJECT_AFTER_TIME - KEEPALIVE_TIMEOUT - REKEY_TIMEOUT);
 
         if (sbufGetLength(buf) > 0)
         {
+            if (! peer->passive_keepalive)
+            {
+                peer->passive_keepalive        = true;
+                peer->passive_keepalive_millis = wireguardRecoveryNow();
+            }
             if (wireguardCommonGetPlaintextPacketMetadata(buf, &source, &packet_len) &&
                 wireguardCommonPeerAllowsIp(peer, &source))
             {
@@ -288,6 +298,8 @@ static void wireguardifProcessResponseMessage(wireguard_device_t *device, wiregu
             return;
         }
         wireguardClearPendingHandshake(peer);
+        peer->retry_handshake = false;
+        peer->send_handshake  = false;
         // Set the IF-UP flag on ts
         device->status_connected = 1;
         wireguardifSendKeepalive(device, peer);
@@ -312,21 +324,13 @@ static void wireguardifSendHandshakeResponse(wireguard_device_t *device, wiregua
             return;
         }
 
-        // Send this packet out!
+        wireguardStorePendingHandshake(peer, packet.type, packet.sender, packet.mac1);
         buf = bufferpoolGetSmallBuffer(getCurrentWorkerBufferPool());
-
-        if (UNLIKELY(! wireguardStorePendingHandshake(peer, &packet, sizeof(packet))))
-        {
-            reuseBuffer(buf);
-            LOGW("WireGuard: failed to retain outbound handshake response");
-            return;
-        }
-
         sbufSetLength(buf, sizeof(message_handshake_response_t));
 
         sbufWrite(buf, &packet, sizeof(message_handshake_response_t));
         // OK!
-        wireguardifPeerOutput(device, buf, peer);
+        wireguardifPeerOutput(device, buf, peer, false);
     }
 }
 
@@ -437,6 +441,7 @@ static void receive(wireguard_device_t *device, sbuf_t *p, const receive_source_
     message_cookie_reply_t         *msg_cookie;
     message_transport_data_t       *msg_data;
 
+    wireguardBeginProcessing(device);
     uint8_t type = wireguardGetMessageType(data, len);
 
     switch (type)
@@ -483,27 +488,8 @@ static void receive(wireguard_device_t *device, sbuf_t *p, const receive_source_
         peer       = peerLookupByPendingHandshake(device, msg_cookie->receiver);
         if (peer)
         {
-            if (wireguardProcessCookieMessage(device, peer, msg_cookie))
-            {
-                // Update the peer location
-                /* A cookie authenticates the responder cookie key, not a new carrier. */
-
-                // Retry the exact initiation or response authenticated by this
-                // cookie. A response cannot be replaced with a new initiation.
-                uint8_t retry_type = peer->pending_handshake.message_type;
-                if (wireguardifRetryHandshake(device, peer) != ERR_OK)
-                {
-                    if (retry_type == MESSAGE_HANDSHAKE_INITIATION)
-                    {
-                        peer->send_handshake     = true;
-                        peer->last_initiation_tx = 0;
-                    }
-                    else
-                    {
-                        LOGW("WireGuard: failed to retransmit cookie-protected handshake response");
-                    }
-                }
-            }
+            /* Cache the cookie for the next ordinary initiation or response. */
+            wireguardProcessCookieMessage(peer, msg_cookie);
         }
         break;
 
@@ -521,7 +507,7 @@ static void receive(wireguard_device_t *device, sbuf_t *p, const receive_source_
         // Unknown or bad packet header
         break;
     }
-    // Release data!
+    wireguardEndProcessing(device);
     reuseBuffer(p);
 }
 

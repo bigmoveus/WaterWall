@@ -5,12 +5,13 @@
  * shown below.
  * Cases: testConstructionHashFailure, testSessionKdfFailureInvalidatesHandshake,
  * testHandshakeResponseFailureClearsPendingState, testInitiationConstructionFailureClearsPendingState,
- * testResponseConstructionFailureInvalidatesHandshake, testCookieMacFailureDoesNotPublishState,
+ * testResponseConstructionFailureInvalidatesHandshake, testCookieMacFailureSuppressesResponse,
  * testClearHandshakeStateErasesActiveAndPendingState, testDeviceDestroyErasesSecrets,
- * testConfiguredKeysRejectMalformedBase64, testConfiguredKeysAcceptCanonicalBase64
+ * testRawDeviceInitialization, testAllowedRangeErrors, testConfiguredKeysRejectMalformedBase64,
+ * testConfiguredKeysAcceptCanonicalBase64
  * Checks: Assertion labels include: WireGuard construction-hash failure was not propagated; WireGuard
  * accepted a failed session KDF; failed session KDF retained handshake secrets; failed session KDF
- * retained pending handshake packet
+ * retained pending handshake authentication data
  * Limits: Platform/feature branches remain conditional. Component fixtures do not establish host-network
  * or application-throughput behavior.
  * CTest: waterwall.wireguard_crypto_failure_unit
@@ -26,7 +27,7 @@ typedef enum crypto_failure_injection_e
 {
     kCryptoFailureNone,
     kCryptoFailureBlake2sInit,
-    kCryptoFailureBlake2sOneShot,
+    kCryptoFailureCookieMac,
     kCryptoFailureX25519,
     kCryptoFailureChaChaEncrypt,
 } crypto_failure_injection_t;
@@ -101,8 +102,9 @@ wcrypto_status_t __wrap_wCryptoBlake2sInit(wcrypto_blake2s_ctx_t *ctx, size_t ou
 wcrypto_status_t __wrap_wCryptoBlake2s(unsigned char *out, size_t outlen, const unsigned char *key, size_t keylen,
                                        const unsigned char *in, size_t inlen)
 {
-    if (crypto_failure_injection == kCryptoFailureBlake2sOneShot)
+    if (crypto_failure_injection == kCryptoFailureCookieMac && keylen == WIREGUARD_COOKIE_LEN)
     {
+        crypto_failure_injection = kCryptoFailureNone;
         if (out != NULL)
         {
             memoryZero(out, outlen);
@@ -186,7 +188,7 @@ static void testSessionKdfFailureInvalidatesHandshake(void)
 
         require(isAllZero(&peer.handshake, sizeof(peer.handshake)), "failed session KDF retained handshake secrets");
         require(isAllZero(&peer.pending_handshake, sizeof(peer.pending_handshake)),
-                "failed session KDF retained pending handshake packet");
+                "failed session KDF retained pending handshake authentication data");
         require(isAllZero(&peer.curr_keypair, sizeof(peer.curr_keypair)) &&
                     isAllZero(&peer.prev_keypair, sizeof(peer.prev_keypair)) &&
                     isAllZero(&peer.next_keypair, sizeof(peer.next_keypair)),
@@ -215,7 +217,7 @@ static void testHandshakeResponseFailureClearsPendingState(void)
 
     require(isAllZero(&peer.handshake, sizeof(peer.handshake)), "failed handshake response retained handshake secrets");
     require(isAllZero(&peer.pending_handshake, sizeof(peer.pending_handshake)),
-            "failed handshake response retained pending handshake packet");
+            "failed handshake response retained pending handshake authentication data");
 }
 
 static void testInitiationConstructionFailureClearsPendingState(void)
@@ -237,7 +239,7 @@ static void testInitiationConstructionFailureClearsPendingState(void)
     require(isAllZero(&peer.handshake, sizeof(peer.handshake)),
             "failed initiation construction retained handshake secrets");
     require(isAllZero(&peer.pending_handshake, sizeof(peer.pending_handshake)),
-            "failed initiation construction retained pending handshake packet");
+            "failed initiation construction retained pending handshake authentication data");
     require(isAllZero(&initiation, sizeof(initiation)), "failed initiation construction retained partial wire output");
 }
 
@@ -294,53 +296,48 @@ static void testResponseConstructionFailureInvalidatesHandshake(void)
         require(isAllZero(&peer.handshake, sizeof(peer.handshake)),
                 "failed response construction retained handshake secrets");
         require(isAllZero(&peer.pending_handshake, sizeof(peer.pending_handshake)),
-                "failed response construction retained pending handshake packet");
+                "failed response construction retained pending handshake authentication data");
         require(isAllZero(&response, sizeof(response)), "failed response construction retained partial wire output");
         require(memcmp(&peer, &expected, sizeof(peer)) == 0,
                 "failed response erasure changed bytes outside the handshake and pending state");
     }
 }
 
-static void testCookieMacFailureDoesNotPublishState(void)
+static void testCookieMacFailureSuppressesResponse(void)
 {
-    wireguard_device_t             device;
-    wireguard_peer_t               peer;
-    message_handshake_initiation_t initiation;
-    message_cookie_reply_t         reply;
-    wireguard_pending_handshake_t  pending_before;
-    uint8_t                        cookie_before[WIREGUARD_COOKIE_LEN];
-    const uint8_t                  source[]             = {127, 0, 0, 1, 0x69, 0x46};
-    const uint32_t                 cookie_millis_before = 0x12345678U;
+    wireguard_device_t           device = {0};
+    wireguard_peer_t             peer;
+    message_handshake_response_t response;
+    message_cookie_reply_t       reply;
+    uint8_t                      source[] = {127, 0, 0, 1, 0x69, 0x46};
 
-    memset(&device, 0, sizeof(device));
-    memset(&peer, 0, sizeof(peer));
-    memset(&initiation, 0, sizeof(initiation));
+    prepareResponderHandshake(&peer);
     memset(device.label_cookie_key, 0x31, sizeof(device.label_cookie_key));
     memcpy(peer.label_cookie_key, device.label_cookie_key, sizeof(peer.label_cookie_key));
 
-    initiation.type   = MESSAGE_HANDSHAKE_INITIATION;
-    initiation.sender = 0x10203040U;
-    memset(initiation.mac1, 0x52, sizeof(initiation.mac1));
-    require(wireguardStorePendingHandshake(&peer, &initiation, sizeof(initiation)),
-            "failed to retain cookie test handshake");
-    require(wireguardCreateCookieReply(
-                &device, &reply, initiation.mac1, initiation.sender, (uint8_t *) source, sizeof(source)),
+    const uint32_t sender_index = 0x10203040U;
+    uint8_t        mac1[WIREGUARD_COOKIE_LEN];
+    memset(mac1, 0x52, sizeof(mac1));
+    wireguardStorePendingHandshake(&peer, MESSAGE_HANDSHAKE_RESPONSE, sender_index, mac1);
+    require(wireguardCreateCookieReply(&device, &reply, mac1, sender_index, source, sizeof(source)),
             "failed to create cookie test reply");
 
-    memset(peer.cookie, 0x73, sizeof(peer.cookie));
-    peer.cookie_millis = cookie_millis_before;
-    memcpy(cookie_before, peer.cookie, sizeof(cookie_before));
-    pending_before = peer.pending_handshake;
-
-    crypto_failure_injection = kCryptoFailureBlake2sOneShot;
-    require(! wireguardProcessCookieMessage(&device, &peer, &reply), "WireGuard accepted a failed cookie mac2");
-    crypto_failure_injection = kCryptoFailureNone;
-
-    require(memcmp(peer.cookie, cookie_before, sizeof(cookie_before)) == 0 &&
-                peer.cookie_millis == cookie_millis_before,
-            "failed cookie mac2 published cookie state");
-    require(memcmp(&peer.pending_handshake, &pending_before, sizeof(pending_before)) == 0,
-            "failed cookie mac2 modified the pending handshake packet");
+    crypto_failure_injection = kCryptoFailureCookieMac;
+    require(wireguardProcessCookieMessage(&peer, &reply) && peer.cookie_valid &&
+                crypto_failure_injection == kCryptoFailureCookieMac,
+            "receiving a cookie attempted to generate mac2");
+    const uint32_t cookie_millis = peer.cookie_millis;
+    uint8_t        cookie[WIREGUARD_COOKIE_LEN];
+    memcpy(cookie, peer.cookie, sizeof(cookie));
+    require(! wireguardCreateHandshakeResponse(&device, &peer, &response) &&
+                crypto_failure_injection == kCryptoFailureNone,
+            "response construction did not reject failed mac2 generation");
+    require(isAllZero(&response, sizeof(response)) && isAllZero(&peer.handshake, sizeof(peer.handshake)) &&
+                isAllZero(&peer.pending_handshake, sizeof(peer.pending_handshake)),
+            "failed mac2 generation retained partial response or handshake state");
+    require(peer.cookie_valid && peer.cookie_millis == cookie_millis &&
+                memcmp(peer.cookie, cookie, sizeof(cookie)) == 0,
+            "failed mac2 generation modified the cached cookie");
 }
 
 static void testClearHandshakeStateErasesActiveAndPendingState(void)
@@ -359,14 +356,92 @@ static void testClearHandshakeStateErasesActiveAndPendingState(void)
 
 static void testDeviceDestroyErasesSecrets(void)
 {
-    wireguard_device_t device;
-    memset(&device, 0xa5, sizeof(device));
+    wireguard_device_t device = {0};
+    memset(device.private_key, 0xa5, sizeof(device.private_key));
+    memset(device.cookie_secret, 0xa5, sizeof(device.cookie_secret));
+    memset(device.label_cookie_key, 0xa5, sizeof(device.label_cookie_key));
+    memset(device.label_mac1_key, 0xa5, sizeof(device.label_mac1_key));
     wireguardDeviceDestroy(&device);
     require(isAllZero(&device, sizeof(device)), "WireGuard device destruction retained secret state");
 }
 
 static const char private_key_base64[] = "0MHoX6RogAEFxKF7c5E84tA1Qy3l9u8IzJfgcVt4B2Y=";
 static const char public_key_base64[]  = "GnRcOavdc180YrXak138cZxWlMoEUZL0Mg/ZyWhLBgo=";
+
+static void testRawDeviceInitialization(void)
+{
+    /* Alice's X25519 key pair from RFC 7748, section 6.1. */
+    const uint8_t key[WIREGUARD_PRIVATE_KEY_LEN] = {
+        0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
+        0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+    };
+    const uint8_t expected_public[WIREGUARD_PUBLIC_KEY_LEN] = {
+        0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7, 0x5a,
+        0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b, 0x4e, 0x6a,
+    };
+    wireguard_device_t device;
+    memset(&device, 0xa5, sizeof(device));
+    require(wireguardDeviceInit(&device, key) && device.valid && device.store == NULL && device.peer_count == 0 &&
+                device.processing_depth == 0,
+            "raw device initialization did not start with an empty peer store");
+    require(memcmp(device.public_key, expected_public, sizeof(expected_public)) == 0,
+            "raw device initialization produced the wrong public key for separate input");
+    wireguardDeviceDestroy(&device);
+
+    memcpy(device.private_key, key, sizeof(key));
+    require(wireguardDeviceInit(&device, device.private_key) &&
+                memcmp(device.public_key, expected_public, sizeof(expected_public)) == 0,
+            "raw device initialization produced the wrong public key for in-device input");
+    wireguardDeviceDestroy(&device);
+
+    memset(&device, 0xa5, sizeof(device));
+    crypto_failure_injection = kCryptoFailureBlake2sInit;
+    require(! wireguardDeviceInit(&device, key) && isAllZero(&device, sizeof(device)),
+            "failed raw device initialization retained partial state");
+    crypto_failure_injection = kCryptoFailureNone;
+    wireguardDeviceDestroy(&device);
+}
+
+static void testAllowedRangeErrors(void)
+{
+    wireguard_device_t device;
+    require(wireguardCommonInit(&device, private_key_base64, NULL, (wireguard_callbacks_t) {0}),
+            "range test device initialization failed");
+    wireguard_peer_init_data_t peer;
+    wireguardifPeerInit(&peer);
+    peer.public_key = (const uint8_t *) public_key_base64;
+    IP_ADDR4(&peer.allowed_ip, 192, 0, 2, 0);
+    ip_addr_t invalid_masks[2];
+    IP_ADDR4(&invalid_masks[0], 255, 0, 255, 0);
+    ipAddrSetAny(true, &invalid_masks[1]);
+    size_t id;
+    for (size_t i = 0; i < ARRAY_SIZE(invalid_masks); ++i)
+    {
+        peer.allowed_mask = invalid_masks[i];
+        require(wireguardifAddPeer(&device, &peer, &id) == ERR_ARG && id == WIREGUARDIF_INVALID_INDEX &&
+                    device.peer_count == 0 && wireguardCommonPeerForIp(&device, &peer.allowed_ip) == NULL,
+                "invalid first range did not reject and roll back peer creation");
+    }
+    IP_ADDR4(&peer.allowed_mask, 255, 255, 255, 255);
+    require(wireguardifAddPeer(&device, &peer, &id) == ERR_OK, "valid first range failed");
+    for (size_t i = 0; i < ARRAY_SIZE(invalid_masks); ++i)
+        require(wireguardifAddAllowedIp(&device, id, &peer.allowed_ip, &invalid_masks[i]) == ERR_ARG,
+                "invalid additional range reported capacity exhaustion");
+    ip_addr_t address;
+    for (unsigned i = 1; i < WIREGUARD_MAX_SRC_IPS; ++i)
+    {
+        IP_ADDR4(&address, 192, 0, 2, i);
+        require(wireguardifAddAllowedIp(&device, id, &address, &peer.allowed_mask) == ERR_OK,
+                "valid range failed before per-peer capacity");
+    }
+    IP_ADDR4(&address, 192, 0, 2, WIREGUARD_MAX_SRC_IPS);
+    require(wireguardifAddAllowedIp(&device, id, &address, &peer.allowed_mask) == ERR_MEM &&
+                wireguardifAddAllowedIp(&device, id, &address, &invalid_masks[0]) == ERR_ARG &&
+                wireguardifAddAllowedIp(&device, id, &peer.allowed_ip, &peer.allowed_mask) == ERR_OK &&
+                wireguardCommonPeerForIp(&device, &address) == NULL,
+            "full range table lost error or duplicate semantics");
+    wireguardDeviceDestroy(&device);
+}
 
 static cJSON *configuredPeer(const char *public_key, const char *preshared_key)
 {
@@ -394,14 +469,17 @@ static void testConfiguredKeysRejectMalformedBase64(void)
     checking_key_decode = true;
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
     {
-        wireguard_device_t device = {0};
-        require(! wireguardCommonInit(&device, invalid[i], NULL, (wireguard_callbacks_t) {0}) && ! device.valid,
+        wireguard_device_t device;
+        memset(&device, 0xa5, sizeof(device));
+        require(! wireguardCommonInit(&device, invalid[i], NULL, (wireguard_callbacks_t) {0}) && ! device.valid &&
+                    device.store == NULL && device.processing_depth == 0,
                 "WireGuard accepted a malformed private key");
+        wireguardDeviceDestroy(&device);
         require(wireguardCommonInit(&device, private_key_base64, NULL, (wireguard_callbacks_t) {0}),
                 "valid private key failed after malformed key rejection");
 
-        uint8_t index    = WIREGUARDIF_INVALID_INDEX;
-        cJSON  *settings = configuredPeer(invalid[i], NULL);
+        size_t index    = WIREGUARDIF_INVALID_INDEX;
+        cJSON *settings = configuredPeer(invalid[i], NULL);
         require(! wireguardCommonAddConfiguredPeer(&device, settings, &index),
                 "WireGuard accepted a malformed configured public key");
         cJSON_Delete(settings);
@@ -416,10 +494,7 @@ static void testConfiguredKeysRejectMalformedBase64(void)
         peer.public_key = (const uint8_t *) invalid[i];
         require(wireguardifAddPeer(&device, &peer, &index) == ERR_ARG,
                 "WireGuard peer helper accepted a malformed public key");
-        for (size_t p = 0; p < WIREGUARD_MAX_PEERS; ++p)
-        {
-            require(! device.peers[p].valid, "malformed key published a peer");
-        }
+        require(device.peer_count == 0 && device.first_peer == NULL, "malformed key published a peer");
         wireguardDeviceDestroy(&device);
     }
     checking_key_decode = false;
@@ -440,11 +515,11 @@ static void testConfiguredKeysAcceptCanonicalBase64(void)
     checking_key_decode = true;
     require(wireguardCommonInit(&device, private_key_base64, NULL, (wireguard_callbacks_t) {0}),
             "WireGuard rejected a canonical private key");
-    uint8_t index    = WIREGUARDIF_INVALID_INDEX;
+    size_t  index    = WIREGUARDIF_INVALID_INDEX;
     cJSON  *settings = configuredPeer(public_key_base64, encoded);
-    require(wireguardCommonAddConfiguredPeer(&device, settings, &index) && index < WIREGUARD_MAX_PEERS &&
-                device.peers[index].valid &&
-                memcmp(device.peers[index].preshared_key, preshared, sizeof(preshared)) == 0,
+    require(wireguardCommonAddConfiguredPeer(&device, settings, &index) &&
+                peerLookupByPeerIndex(&device, index) != NULL &&
+                memcmp(peerLookupByPeerIndex(&device, index)->preshared_key, preshared, sizeof(preshared)) == 0,
             "WireGuard rejected or changed canonical configured keys");
     cJSON_Delete(settings);
     require(wireguardifRemovePeer(&device, index) == ERR_OK, "configured peer removal failed");
@@ -453,8 +528,7 @@ static void testConfiguredKeysAcceptCanonicalBase64(void)
     wireguardifPeerInit(&peer);
     peer.public_key    = (const uint8_t *) public_key_base64;
     peer.preshared_key = preshared;
-    require(wireguardifAddPeer(&device, &peer, &index) == ERR_OK && index < WIREGUARD_MAX_PEERS &&
-                device.peers[index].valid,
+    require(wireguardifAddPeer(&device, &peer, &index) == ERR_OK && peerLookupByPeerIndex(&device, index) != NULL,
             "WireGuard peer helper rejected a canonical public key");
     wireguardDeviceDestroy(&device);
     checking_key_decode = false;
@@ -476,9 +550,11 @@ int main(void)
     testHandshakeResponseFailureClearsPendingState();
     testInitiationConstructionFailureClearsPendingState();
     testResponseConstructionFailureInvalidatesHandshake();
-    testCookieMacFailureDoesNotPublishState();
+    testCookieMacFailureSuppressesResponse();
     testClearHandshakeStateErasesActiveAndPendingState();
     testDeviceDestroyErasesSecrets();
+    testRawDeviceInitialization();
+    testAllowedRangeErrors();
     testConfiguredKeysRejectMalformedBase64();
     testConfiguredKeysAcceptCanonicalBase64();
 

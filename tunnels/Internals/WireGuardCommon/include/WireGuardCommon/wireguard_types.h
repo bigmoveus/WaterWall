@@ -58,10 +58,8 @@ typedef struct wireguard_pending_handshake_s
 {
     bool     valid;
     uint8_t  message_type;
-    uint16_t packet_len;
     uint32_t sender;
     uint8_t  mac1[WIREGUARD_COOKIE_LEN];
-    uint8_t  packet[sizeof(message_handshake_initiation_t)];
 } wireguard_pending_handshake_t;
 
 // 5.4.6 Subsequent Messages: Transport Data Messages
@@ -115,15 +113,13 @@ struct wireguard_keypair_s
     bool     initiator : 1; // Did we send the handshake initiation?
     bool     sending_valid : 1;
     bool     receiving_valid : 1;
+    bool     age_rekey_requested : 1;
     uint32_t keypair_millis;
 
     uint8_t  sending_key[WIREGUARD_SESSION_KEY_LEN];
     uint64_t sending_counter;
 
     uint8_t receiving_key[WIREGUARD_SESSION_KEY_LEN];
-
-    uint32_t last_tx;
-    uint32_t last_rx;
 
     uint32_t replay_bitmap;
     uint64_t replay_counter;
@@ -155,11 +151,20 @@ typedef struct wireguard_allowed_ip_s
 
 struct wireguard_peer_s
 {
+    struct wireguard_device_s *device;
+    struct wireguard_peer_s   *next, *previous;
+    size_t                     id;
+    void                      *context;              /* Optional wrapper-owned binding. */
+    uint32_t                   indexed_receivers[5]; /* Handshake, pending cookie, three transport keys. */
+
     bool valid : 1;  // Is this peer initialised?
     bool active : 1; // Should we be actively trying to connect?
     bool session_erase_armed : 1;
     // We set this flag on RX/TX of packets if we think that we should initiate a new handshake
     bool send_handshake : 1;
+    bool retry_handshake : 1;
+    bool passive_keepalive : 1;
+    bool cookie_valid : 1;
 
     // This is the configured IP of the peer (endpoint)
     ip_addr_t connect_ip;
@@ -192,7 +197,7 @@ struct wireguard_peer_s
     // The active handshake that is happening
     struct wireguard_handshake_s handshake;
 
-    // Decrypted cookie from the responder
+    // Cookie cached for the next outbound handshake message.
     uint32_t cookie_millis;
     uint8_t  cookie[WIREGUARD_COOKIE_LEN];
 
@@ -208,9 +213,19 @@ struct wireguard_peer_s
     // The last time we sent an initiation message to this peer
     uint32_t last_initiation_tx;
 
-    // last_tx and last_rx of data packets
+    // A zero interval disarms the timer. Tick zero is a valid start time.
+    uint16_t initiation_interval_ms;
+    uint16_t unanswered_interval_ms;
+    uint32_t handshake_attempt_millis;
+    uint32_t unanswered_millis;
+    uint32_t passive_keepalive_millis;
+
+    // Detect synchronous authenticated activity inside output, including at the same clock tick.
+    uint32_t authenticated_receives;
+    uint32_t authenticated_sends;
+
+    // Cached monotonic milliseconds of the last transport send, for persistent keepalive.
     uint32_t last_tx;
-    uint32_t last_rx;
 };
 typedef struct wireguard_peer_s wireguard_peer_t;
 
@@ -223,6 +238,10 @@ typedef struct wireguard_callbacks_s
     void (*inner)(void *context, sbuf_t *packet, wireguard_peer_t *peer);
     wireguard_peer_t *(*candidate)(void *context, const uint8_t public_key[32]);
     bool (*authenticated)(void *context, wireguard_peer_t *peer);
+    /* Optional: reject background/demand initiations without a live authorized carrier. */
+    bool (*can_initiate)(void *context, wireguard_peer_t *peer);
+    /* Optional: consumes a routed inner datagram when no transport key can send it. */
+    void (*key_unavailable)(void *context, sbuf_t *packet, wireguard_peer_t *peer);
 } wireguard_callbacks_t;
 
 struct wireguard_device_s
@@ -231,6 +250,7 @@ struct wireguard_device_s
     wireguard_callbacks_t callbacks;
     bool                  status_connected : 1;
     bool                  valid : 1;
+    uint16_t              padding_mtu; /* Inner IP byte ceiling for optional transport padding. */
 
     uint8_t public_key[WIREGUARD_PUBLIC_KEY_LEN];
     uint8_t private_key[WIREGUARD_PRIVATE_KEY_LEN];
@@ -242,7 +262,10 @@ struct wireguard_device_s
     uint8_t label_cookie_key[WIREGUARD_SESSION_KEY_LEN];
     uint8_t label_mac1_key[WIREGUARD_SESSION_KEY_LEN];
 
-    // List of peers associated with this device
-    wireguard_peer_t peers[WIREGUARD_MAX_PEERS];
+    struct wireguard_peer_store_s *store;
+    wireguard_peer_t              *first_peer, *retired_peers;
+    wireguard_peer_t              *next_timer_peer; /* First deferred peer to service on the next tick. */
+    size_t                         peer_count, next_peer_id;
+    unsigned                       processing_depth; /* Removed allocations survive reentrant owner callbacks. */
 };
 typedef struct wireguard_device_s wireguard_device_t;

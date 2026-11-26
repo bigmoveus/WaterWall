@@ -10,8 +10,10 @@
 #include "AuthenticationClient/structure.h"
 #undef kTunnelStateSize
 #undef kLineStateSize
-#include "../../../../../tunnels/WireGuardServer/server.c"
 #include "PacketsToConnection/structure.h"
+#include "WireGuardServer/interface.h"
+#include "WireGuardServer/structure.h"
+#include "loggers/network_logger.h"
 #include "lwip/engine_runtime.h"
 #include "managers/node_manager.c" /* Actual central lifecycle traversal. */
 
@@ -291,7 +293,7 @@ static tunnel_t *wgServerFixtureConstruct(wg_server_fixture_t *f, const char *ex
     f->server_node.node_settings_json = cJSON_Parse(settings);
     ww_startup_context_t startup      = {0};
     wwStartupContextBegin(&startup);
-    f->server = create(&f->server_node);
+    f->server = f->server_node.createHandle(&f->server_node);
     discard wwStartupContextEnd(&startup);
     f->server_node.instance = f->server;
     if (f->server != NULL)
@@ -340,7 +342,7 @@ static void wgServerFixtureSetup(wg_server_fixture_t *f, wid_t workers, const ch
     wCryptoZero(private_key, sizeof(private_key));
     cJSON *peer =
         cJSON_Parse("{\"publickey\":\"GnRcOavdc180YrXak138cZxWlMoEUZL0Mg/ZyWhLBgo=\",\"allowedips\":\"0.0.0.0/0\"}");
-    uint8_t index;
+    size_t index;
     twfRequire(wireguardCommonAddConfiguredPeer(&f->client, peer, &index), "client peer creation failed");
     cJSON_Delete(peer);
     f->client_initialized = true;
@@ -375,9 +377,9 @@ static line_t *wgServerFixtureIngress(wg_server_fixture_t *f, wid_t wid)
     discard tosSetCurrentWorker(previous);
     return line;
 }
-static void wgServerFixtureExchangePending(wg_server_fixture_t *f, unsigned held_dispatches)
+static void wgServerFixtureExchangeClientOnWorker(wg_server_fixture_t *f, wireguard_device_t *client, wid_t wid,
+                                                  unsigned held_dispatches)
 {
-    const wid_t wid = f->env.count - 1;
     if (f->ingress[wid] == NULL)
         wgServerFixtureIngress(f, wid);
     for (unsigned iteration = 0; iteration < 32; ++iteration)
@@ -394,11 +396,19 @@ static void wgServerFixtureExchangePending(wg_server_fixture_t *f, unsigned held
         const unsigned responses = f->client_count;
         f->client_count          = 0;
         for (unsigned i = 0; i < responses; ++i)
-            wireguardCommonReceive(&f->client, f->to_client[i], &source, 51820);
+            wireguardCommonReceive(client, f->to_client[i], &source, 51820);
         if (f->server_count == 0 && f->client_count == 0 && atomic_load(&f->state->dispatch.count) == held_dispatches)
             return;
     }
     twfRequire(false, "server proof exchange did not settle");
+}
+static void wgServerFixtureExchangeClient(wg_server_fixture_t *f, wireguard_device_t *client, unsigned held_dispatches)
+{
+    wgServerFixtureExchangeClientOnWorker(f, client, f->env.count - 1, held_dispatches);
+}
+static void wgServerFixtureExchangePending(wg_server_fixture_t *f, unsigned held_dispatches)
+{
+    wgServerFixtureExchangeClient(f, &f->client, held_dispatches);
 }
 static void wgServerFixtureExchange(wg_server_fixture_t *f)
 {
@@ -407,10 +417,10 @@ static void wgServerFixtureExchange(wg_server_fixture_t *f)
 static void wgServerFixtureProof(wg_server_fixture_t *f)
 {
     discard tosSetCurrentWorker(0);
-    twfRequire(wireguardifStartHandshake(&f->client, &f->client.peers[0], true) == ERR_OK, "client initiation failed");
+    twfRequire(wireguardifStartHandshake(&f->client, f->client.first_peer, true) == ERR_OK, "client initiation failed");
     wgServerFixtureExchange(f);
-    twfRequire(f->state->bindings[0].usable && f->state->engine.peers[0].curr_keypair.valid &&
-                   f->client.peers[0].curr_keypair.valid,
+    twfRequire(f->state->binding_head->usable && f->state->binding_head->peer->curr_keypair.valid &&
+                   f->client.first_peer->curr_keypair.valid,
                "real authenticated proof did not establish binding and keys");
 }
 static sbuf_t *wgServerFixtureUdpPacket(wg_server_fixture_t *f, uint16_t source_port)

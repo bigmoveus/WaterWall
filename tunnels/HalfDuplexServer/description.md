@@ -246,6 +246,20 @@ This matches the direction of traffic pressure:
 - backpressure on downstream replies affects the main line
 - backpressure from the service side affects the upload path
 
+A half that was moved to another worker receives its payload through PipeTunnel.
+When its consumer sends Pause, the receiving worker holds later buffers for
+that direction in arrival order, including buffers already in its worker inbox.
+The sending worker can see the pause on its next send. On Resume, the receiver
+forwards held buffers until its consumer pauses again or the queue empties.
+Once the queue is empty and the consumer is ready, the pipe resumes the producer.
+For a download through Reality, this defers record allocation for held payload
+until the download transport can accept more records.
+
+PipeTunnel applies no configured size limit to these per-direction queues.
+Memory use depends on how much data was already in flight and how much more the
+producer sends during Pause. The waiting-upload limit above applies separately
+to halves that are still waiting for a match.
+
 The server remains an endpoint for each exact line: it borrows the two transports
 and owns the reconstructed main line. It must stay active to map payload, pressure
 and Finish between them. Its startup replay still respects next-side Pause; the

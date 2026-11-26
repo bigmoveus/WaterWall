@@ -7,11 +7,11 @@ if(TARGET WireGuardCommon)
 endif()
 
 if(LINUX AND TARGET WireGuardServer)
-  waterwall_add_native_executable(wireguard_server_endpoint_test SUPPORT SOURCES
-    ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/wireguard_server_endpoint_test.c)
-  target_link_libraries(wireguard_server_endpoint_test PRIVATE ww_test_support WireGuardCommon AuthenticationClient UserController PacketsToConnection)
-  target_include_directories(wireguard_server_endpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/tunnels/WireGuardServer/include)
+  waterwall_add_native_executable(wireguard_server_endpoint_test SUPPORT
+    SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/wireguard_server_endpoint_test.c
+    LIBRARIES WireGuardServer)
   target_link_options(wireguard_server_endpoint_test PRIVATE
+    "-Wl,--wrap=sendWorkerMessageForceQueueWithCleanup"
     "-Wl,--wrap=abortProgramNow" "-Wl,--wrap=requestProgramShutdown"
     "-Wl,--wrap=bufferpoolGetLargeBuffer" "-Wl,--wrap=bufferpoolTryGetBestFit"
     "-Wl,--wrap=bufferpoolGetBestFit" "-Wl,--wrap=bufferpoolGetSpliceBuffer"
@@ -167,12 +167,12 @@ endif()
 
 
 if(LINUX AND TARGET WireGuardClient)
-  waterwall_add_native_executable(wireguard_client_carrier_test SUPPORT SOURCES
-    ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/wireguard_client_carrier_test.c)
-  target_link_libraries(wireguard_client_carrier_test PRIVATE ww_test_support WireGuardCommon)
-  target_include_directories(wireguard_client_carrier_test PRIVATE ${CMAKE_SOURCE_DIR}/tunnels/WireGuardClient/include)
+  waterwall_add_native_executable(wireguard_client_carrier_test SUPPORT
+    SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/wireguard_client_carrier_test.c
+    LIBRARIES WireGuardClient)
   target_link_options(wireguard_client_carrier_test PRIVATE
-    "-Wl,--wrap=wireguardCommonReceiveOnCarrier"
+    "-Wl,--wrap=getTickMS" "-Wl,--wrap=wireguardCommonReceiveOnCarrier"
+    "-Wl,--wrap=isSystemUnderLoad"
     "-Wl,--wrap=abortProgramNow" "-Wl,--wrap=requestProgramShutdown"
     "-Wl,--wrap=bufferpoolGetLargeBuffer" "-Wl,--wrap=bufferpoolTryGetBestFit"
     "-Wl,--wrap=bufferpoolGetBestFit" "-Wl,--wrap=bufferpoolGetSpliceBuffer"
@@ -209,10 +209,9 @@ if(LINUX AND TARGET WireGuardCommon)
 endif()
 
 if(LINUX AND TARGET WireGuardServer)
-  waterwall_add_native_executable(wireguard_user_binding_test SUPPORT SOURCES
-    ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/wireguard_user_binding_test.c)
-  target_link_libraries(wireguard_user_binding_test PRIVATE ww_test_support WireGuardCommon AuthenticationClient UserController PacketsToConnection)
-  target_include_directories(wireguard_user_binding_test PRIVATE ${CMAKE_SOURCE_DIR}/tunnels/WireGuardServer/include)
+  waterwall_add_native_executable(wireguard_user_binding_test SUPPORT
+    SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/wireguard_user_binding_test.c
+    LIBRARIES WireGuardServer)
   target_link_options(wireguard_user_binding_test PRIVATE
     "-Wl,--wrap=abortProgramNow" "-Wl,--wrap=requestProgramShutdown"
     "-Wl,--wrap=bufferpoolGetLargeBuffer" "-Wl,--wrap=bufferpoolTryGetBestFit"
@@ -225,11 +224,10 @@ if(LINUX AND TARGET WireGuardServer)
   add_waterwall_unit_test(waterwall.wireguard_user_binding_unit wireguard_user_binding_test
     "unit;tunnels;wireguard;authentication;usercontroller;ip;identity")
 
-  waterwall_add_native_executable(wireguard_server_lifecycle_test SUPPORT SOURCES
-    ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/wireguard_server_lifecycle_test.c
-    ${CMAKE_SOURCE_DIR}/ww/lwip/engine_runtime.c)
-  target_link_libraries(wireguard_server_lifecycle_test PRIVATE ptc_engine_test ww_lwip_engine_test WireGuardCommon AuthenticationClient UserController)
-  target_include_directories(wireguard_server_lifecycle_test PRIVATE ${CMAKE_SOURCE_DIR}/tunnels/WireGuardServer/include)
+  waterwall_add_native_executable(wireguard_server_lifecycle_test SUPPORT
+    SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/wireguard_server_lifecycle_test.c
+      ${CMAKE_SOURCE_DIR}/ww/lwip/engine_runtime.c
+    LIBRARIES WireGuardServer ptc_engine_test ww_lwip_engine_test)
   target_link_options(wireguard_server_lifecycle_test PRIVATE
     "-Wl,--wrap=sendWorkerMessageForceQueueWithCleanup"
     "-Wl,--wrap=tunnelDestroy"
@@ -245,18 +243,24 @@ if(LINUX AND TARGET WireGuardServer)
 endif()
 
 if(LINUX AND TARGET WireGuardServer)
-  waterwall_add_native_executable(wireguard_server_retirement_test SUPPORT SOURCES
-    ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/wireguard_server_retirement_test.c)
-  target_link_libraries(wireguard_server_retirement_test PRIVATE ww_test_support ptc_engine_test ww_lwip_engine_test WireGuardCommon AuthenticationClient UserController)
-  target_include_directories(wireguard_server_retirement_test PRIVATE ${CMAKE_SOURCE_DIR}/tunnels/WireGuardServer/include)
-  target_link_options(wireguard_server_retirement_test PRIVATE
-    "-Wl,--wrap=sendWorkerMessageForceQueueWithCleanup" "-Wl,--wrap=ptcRetireSourceRange" "-Wl,--wrap=tunnelDestroy" "-Wl,--wrap=tunnelOwnedChildDestroy"
-    "-Wl,--wrap=abortProgramNow" "-Wl,--wrap=requestProgramShutdown"
-    "-Wl,--wrap=bufferpoolGetLargeBuffer" "-Wl,--wrap=bufferpoolTryGetBestFit"
-    "-Wl,--wrap=bufferpoolGetBestFit" "-Wl,--wrap=bufferpoolGetSpliceBuffer"
-    "-Wl,--wrap=bufferpoolGetMediumBuffer" "-Wl,--wrap=bufferpoolGetSmallBuffer"
-    "-Wl,--wrap=bufferpoolReuseBuffer" "-Wl,--wrap=sbufDestroy")
-  add_dependencies(waterwall_unit_tests wireguard_server_retirement_test)
+  foreach(suite retirement capacity)
+    set(target wireguard_server_${suite}_test)
+    waterwall_add_native_executable(${target} SUPPORT
+      SOURCES ${WATERWALL_UNIT_SOURCE_ROOT}/tunnels/wireguard/${target}.c
+      LIBRARIES WireGuardServer ptc_engine_test ww_lwip_engine_test)
+    target_link_options(${target} PRIVATE
+      "-Wl,--wrap=sendWorkerMessageForceQueueWithCleanup" "-Wl,--wrap=tunnelDestroy" "-Wl,--wrap=tunnelOwnedChildDestroy"
+      "-Wl,--wrap=abortProgramNow" "-Wl,--wrap=requestProgramShutdown"
+      "-Wl,--wrap=bufferpoolGetLargeBuffer" "-Wl,--wrap=bufferpoolTryGetBestFit"
+      "-Wl,--wrap=bufferpoolGetBestFit" "-Wl,--wrap=bufferpoolGetSpliceBuffer"
+      "-Wl,--wrap=bufferpoolGetMediumBuffer" "-Wl,--wrap=bufferpoolGetSmallBuffer"
+      "-Wl,--wrap=bufferpoolReuseBuffer" "-Wl,--wrap=sbufDestroy")
+  endforeach()
+  target_link_options(wireguard_server_retirement_test PRIVATE "-Wl,--wrap=ptcRetireSourceRange")
+  target_link_options(wireguard_server_capacity_test PRIVATE "-Wl,--wrap=getTickMS" "-Wl,--wrap=getHRTimeUs")
   add_waterwall_unit_test(waterwall.wireguard_server_retirement_unit wireguard_server_retirement_test
     "unit;tunnels;wireguard;retirement;workers;authentication")
+  # The portable software crypto backend also completes all 5,000 handshakes under sanitizers.
+  add_waterwall_unit_test(waterwall.wireguard_server_capacity_unit wireguard_server_capacity_test
+    "unit;tunnels;wireguard;capacity;workers;authentication" 300)
 endif()

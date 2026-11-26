@@ -1,138 +1,198 @@
 # WireGuardServer
 
-WireGuardServer authenticates encrypted datagrams from `prev`. Required `mode`
-selects raw inner packets or individually managed connections toward `next`.
-At `Init`, the server selects UDP from the incoming destination offer.
-The UDP ingress is an ordinary UdpListener; endpoints are learned only from
-cryptographically authenticated handshake/data messages.
+`WireGuardServer` authenticates encrypted WireGuard datagrams and returns
+encrypted replies through the live ingress line. Its required `mode` selects
+what it delivers to the next node.
+
+## Choose a mode
+
+| | `packet` | `connection` |
+| --- | --- | --- |
+| Use case | Deliver inner IP packets to a TUN interface or another L3 node. | Open outbound TCP connections and UDP associations for authenticated accounts. |
+| Peer configuration | One or more static peers with non-overlapping allowed ranges. A preshared key is optional. | A named `AuthenticationClient` supplies accounts. Static peers and preshared keys are rejected. |
+| Inner traffic | Raw IP packets. The example uses IPv4 with `TunDevice`. | Unfragmented IPv4 TCP and UDP. IPv6, ICMP and fragment reassembly are unsupported. |
+| Host networking | The OS handles routes, forwarding and any required NAT when a TUN interface is used. | An outbound adapter opens sockets for each flow. The server needs no TUN interface or NAT for this path. |
+
+## Typical placement
 
 ```text
-UdpListener -> WireGuardServer(mode=packet) -> TunDevice
-UdpListener -> WireGuardServer(mode=connection) -> TcpUdpConnector
+Packet mode     UdpListener -> WireGuardServer(mode=packet) -> TunDevice
+Connection mode UdpListener -> WireGuardServer(mode=connection) -> TcpUdpConnector
 ```
 
-Both paths carry traffic in both directions. The packet consumer may be any
-compatible L3 node; the connection consumer may be a compatible router/transform
-leading to an outbound adapter. The node never changes host routes or NAT.
-Configured private, public and preshared keys use canonical Base64 encoding of
-32 bytes: 44 characters with one trailing `=`.
+Both paths carry replies in the opposite direction. The server selects UDP from
+the incoming destination offer at initialization and learns the outer peer
+endpoint from authenticated WireGuard traffic. In packet mode, any compatible
+L3 node can consume the packets. In connection mode, you can put a compatible
+router or transform before the outbound adapter. To dial the requested
+destination, set the connector's address and port to
+`dest_context->address` and `dest_context->port`.
 
-Packet mode uses static peers, at most 32 active peers. Peer objects require
-`publickey` and `allowedips` and accept optional `presharedkey` and
-`persistentkeepalive` as on WireGuardClient. Omit peer endpoints: authenticated
-traffic supplies the return carrier. All peer ranges must be non-overlapping.
-Decrypted source addresses must belong to the authenticated peer's allowed
-range. Return destinations select the matching peer.
+## Minimal practical example
+
+### Packet mode
+
+Place this node after a `UdpListener` whose `next` is `vpn`. Define `tun` as
+a [TunDevice](https://radkesvat.github.io/WaterWall-Docs/docs/noderefs/TunDevice) with an inner IP address. Replace the example
+keys in deployments and configure each peer's allowed range.
 
 ```json
 {
-  "nodes": [
-    {"name":"udp","type":"UdpListener","settings":{"address":"0.0.0.0","port":51820},"next":"vpn"},
-    {"name":"vpn","type":"WireGuardServer","settings":{
-      "mode":"packet","privatekey":"EBJOHctLU2w8uteyTE+WU0hruB09Ub0vwVS+Gt9wAls=",
-      "peers":[{"publickey":"dDUfRvZSDy8jZBsB4kQflTO+iwlLbR+jgb840fumqUM=","allowedips":"10.50.0.4/30"}]
-    },"next":"tun"},
-    {"name":"tun","type":"TunDevice","settings":{"device-name":"wg-inner","device-ip":"10.50.0.1/24"}}
-  ]
+  "name": "vpn",
+  "type": "WireGuardServer",
+  "settings": {
+    "mode": "packet",
+    "privatekey": "EBJOHctLU2w8uteyTE+WU0hruB09Ub0vwVS+Gt9wAls=",
+    "peers": [
+      {
+        "publickey": "dDUfRvZSDy8jZBsB4kQflTO+iwlLbR+jgb840fumqUM=",
+        "allowedips": "10.50.0.4/30"
+      }
+    ]
+  },
+  "next": "tun"
 }
 ```
 
-Configure the TunDevice platform settings as described in its node reference.
-Install forwarding, OS routes and any required NAT for the inner subnet using
-your deployment's normal network administration. Such host changes are separate
-from the WireGuard node.
+See the [paired WireGuard packet tunnel](https://radkesvat.github.io/WaterWall-Docs/docs/examples/tunnels/wireguard)
+for complete files, host routing and a connectivity test.
 
-Connection mode requires `auth-client-node-name`, referencing a separately
-configured AuthenticationClient service. Static `peers` and PSK settings are
-rejected in this mode. Account WireGuard public keys follow AuthenticationClient's existing credential
-convention: the private key is the 32-byte SHA-256 digest of the account password,
-and the public key is its X25519 public key. Encode the digest in Base64 for the
-client's `privatekey`. `wireguard-allowed-ips` contains the account's unique CIDR; account ids are durable and
-nonzero. Authenticated mode supports IPv4 accounts. The account collection
-rejects overlapping ranges before publication.
+### Connection mode
+
+Place this node after a `UdpListener` whose `next` is `vpn`. Define
+`outbound` as a `TcpUdpConnector` and `accounts` as an
+[AuthenticationClient](https://radkesvat.github.io/WaterWall-Docs/docs/noderefs/AuthenticationClient) in the same configuration.
+The client uses its own service name and secret to connect to
+[AuthenticationServer](https://radkesvat.github.io/WaterWall-Docs/docs/noderefs/AuthenticationServer). The account lookup is a
+separate service from the traffic path.
 
 ```json
 {
-  "name":"vpn","type":"WireGuardServer","settings":{
-    "mode":"connection",
-    "privatekey":"EBJOHctLU2w8uteyTE+WU0hruB09Ub0vwVS+Gt9wAls=",
-    "auth-client-node-name":"accounts"
-  },"next":"outbound"
+  "name": "vpn",
+  "type": "WireGuardServer",
+  "settings": {
+    "mode": "connection",
+    "privatekey": "EBJOHctLU2w8uteyTE+WU0hruB09Ub0vwVS+Gt9wAls=",
+    "auth-client-node-name": "accounts"
+  },
+  "next": "outbound"
 }
 ```
 
-Configure `accounts` as an AuthenticationClient with its ordinary named-service
-credentials and transport to AuthenticationServer. `outbound` is a
-TcpUdpConnector with destination context settings. The private payload pipeline
-is built automatically before indexing:
+Give each account a durable, nonzero ID and a unique IPv4 CIDR in
+`wireguard-allowed-ips`. The client uses the Base64 encoding of the raw
+32-byte SHA-256 digest of the account password as its WireGuard private key.
+The authentication service derives the matching X25519 public key. The account
+collection rejects overlapping ranges. See the
+[authenticated WireGuard walkthrough](https://radkesvat.github.io/WaterWall-Docs/docs/examples/tunnels/wireguard-connection)
+for both endpoints and the account file.
 
-```text
-WireGuardServer -> PacketsToConnection -> user binding -> UserController -> outbound
-```
+## Settings
 
-The real server-to-PTC edge is L3. AuthenticationClient is a service reference,
-not part of this payload path. Inner TCP connections and UDP associations receive
-the resolved stable account handle and owned profile before outbound Init.
-Unknown, stale, disabled or expired identities cannot pass anonymously.
-PTC supports unfragmented IPv4 TCP/UDP here; IPv6, ICMP and fragment reassembly
-are not connection-mode features.
+The node requires a named `next` in both modes. Private keys, public keys and
+preshared keys use canonical Base64 encoding of 32 bytes, with 44 characters
+including one trailing `=`.
 
-UserController applies connection limits, shared account bandwidth, traffic
-quotas, expiry/disable and first-use accounting to inner payload. TCP uses stream
-shaping and UDP preserves datagrams. WireGuard handshakes, carrier lines,
-keepalives and encrypted overhead consume no inner connection or traffic quota.
+| Setting | Applies to | Contract |
+| --- | --- | --- |
+| `mode` | Both | Required. Use `"packet"` or `"connection"`. |
+| `privatekey` | Both | Required local WireGuard private key. |
+| `peers` | Packet | Required nonempty array of static peers. Omit in connection mode. |
+| `auth-client-node-name` | Connection | Required name of the `AuthenticationClient` node. Omit in packet mode. |
+| `max-unauthenticated-ingress` | Both | Maximum live UDP endpoints awaiting peer authentication. Range 1–2147483647, default 1024. |
+| `max-pending-rekey-bytes` | Both | Total allocated bytes the server can retain for packets awaiting new keys. Range 0–4294967295, default 4194304 (4 MiB). Set to 0 to disable retention. |
+| `udp-idle-timeout-ms` | Connection | Idle timeout for an inner UDP association. Range 1–4294967295 ms, default 300000 ms. |
+| `mtu` | Both | Inner IP size in bytes up to which WireGuard may add padding. Integer from 68 to 65535. Defaults to the smaller of core `misc.mtu` and 1420. |
+| `max-pending-bytes` | Connection | See the [PacketsToConnection settings](https://radkesvat.github.io/WaterWall-Docs/docs/noderefs/PacketsToConnection). |
 
-An IP limit counts distinct **inner client source IPs with active admitted
-connections/associations**, per account across workers. Allowed ranges specify
-which sources may be used; unused allowed addresses consume no slots. Many flows
-from one source share one IP slot. A second source is denied at IP limit 1 until
-the first source's last flow closes/expires. Server/destination IPs and outer
-endpoints do not count. Authenticated external roaming preserves the saved inner
-IP reservations.
+Before encryption, WireGuard rounds the inner IP packet length up to a multiple
+of 16 bytes, capping the padding at `mtu` bytes of total plaintext. At or above
+that size it encrypts the whole packet with zero added padding. Set the MTU of
+the inner packet source and the WireGuard padding ceiling to leave room for
+the carrier and WireGuard headers.
+For example, on a 1500-byte path, direct UDP over IPv6 with a 40-byte IP
+header leaves 1420 bytes for the inner packet. WireGuard uses the configured
+ceiling without probing the path.
 
-Existing authenticated bindings retain cached account enforcement and may rekey
-during explicit control authentication rejection. New peers and every new inner
-TCP/UDP Init still require fresh admission, including work delayed across that
-rejection. Denying a new flow preserves older eligible flows and their account
-reservations. Disablement, expiry, quota and key/range revocation still apply.
+In connection mode, an explicit `mtu` also sets the MTU of the embedded
+`PacketsToConnection` IPv4 interface. When omitted, that interface uses core
+`misc.mtu` in full.
 
-Admission is on demand after candidate-key recovery and full protocol proof.
-There are at most 32 active/provisional/retiring bindings. Capacity refusal drops
-the new handshake without displacing established sessions or truncating the
-account table. Candidate failures release their slot immediately.
+Each static peer requires `publickey` and `allowedips`. The latter is a
+comma-separated string of up to 16 CIDRs. It authorizes source addresses on
+decrypted incoming packets and selects the peer for reply destinations. Keep
+ranges for different peers disjoint. A peer can set `presharedkey` and
+`persistentkeepalive` as described for [WireGuardClient](https://radkesvat.github.io/WaterWall-Docs/docs/noderefs/WireGuardClient).
+Omit `endpoint` from server peers because authenticated incoming traffic
+supplies the return endpoint.
 
-One owner-worker timer checks installed account generations every 400 ms and
-revalidates all active bindings (at most 32 per tick). The next tick observes a
-change within 400 ms plus ordinary owner-loop queueing time. Handshakes and new flows
-also revalidate. Unchanged refreshes preserve identity continuity, including queued datagrams.
-A queued handshake cannot publish credentials whose continuity began after its
-intake generation. Usable RAM
-cache admission follows AuthenticationClient's outage policy. Key/range changes,
-removal/recreation and durable-owner reassignment close affected admission.
-Per-worker retirement closes TCP/UDP lines, pre-line protocol state and TCP
-closers before range reuse. Deferred input, reverse output and carrier sends
-carry non-reusable epochs. A changed range remains reserved until every owner
-acknowledges retirement and a fresh handshake validates current authorization.
-A failed retirement acknowledgment leaves the affected range closed until node
-shutdown; unrelated bindings continue.
+Custom builds with `INCLUDE_WIREGUARD_SERVER` need `AuthenticationClient`,
+`UserController` and `PacketsToConnection` enabled.
 
-Protocol state and timers run on worker 0. UDP ingress lines are borrowed from
-UdpListener on their original workers, retaining their exact source and local
-endpoint; replies use the same live carrier. Finish detaches it without
-reflecting callbacks to its sender. Node shutdown closes admission and timers,
-settles queued work, drains borrowed handles via their adapter owners, then
-releases keys/helpers. Each node bounds cross-worker packet work to 512 messages
-and 8 MiB; excess input/output drops. Packet mode does not apply connection-mode
-account management to persistent packet lines.
+## Usage and troubleshooting
 
-The server admits at most 1024 live borrowed UDP ingress handles. Excess carrier
-Init is refused through its adapter owner. In connection mode,
-`udp-idle-timeout-ms` configures association expiry (1–4294967295 ms; default
-300000), and the PTC `mtu`/pending-byte settings retain their normal contracts.
-Building WireGuardServer requires AuthenticationClient, UserController and
-PacketsToConnection. WireGuardClient links WireGuardCommon and supports compatible
-datagram-preserving carrier chains, including `UdpOverTcpClient -> TcpConnector`.
+- **No handshake.** Check that the client can reach the outer `UdpListener`
+  and that each side has the other side's matching public key. In packet mode,
+  any configured preshared key must match on both sides. In connection mode,
+  check the named authentication service, account status and key derivation.
+- **Packet mode handshakes but passes no traffic.** Check that the client's
+  inner source is in its server-side `allowedips`, the client allows the
+  server's inner source, and host routes send inner traffic through the TUN.
+  Check host forwarding, return routes and NAT if reaching other networks.
+- **Connection mode handshakes but a flow fails.** Test an IPv4 TCP or UDP
+  service that the server can reach. Verify the account's `wireguard-allowed-ips`,
+  limits and expiry, and check that the outbound connector uses the requested
+  destination.
+- **The connection-mode IP limit is reached.** An account's distinct inner
+  client source IPs with active admitted flows count across all workers.
+  Multiple flows from one source share a slot. With an IP limit of one, the
+  next source has to wait for the first source's last connection or association
+  to close or expire. Allowed addresses with no active flows consume no slots.
+  Outer endpoint changes preserve the existing inner IP reservations.
 
+## Advanced behavior
 
-Complete runnable core/config pairs are available in the
-[WireGuard examples](https://github.com/radkesvat/WaterWall/tree/main/tunnels/WireGuardClient/examples).
+In connection mode the server inserts
+`PacketsToConnection -> account binding -> UserController` before the
+configured next node. Each inner flow receives its account before outbound
+initialization. Unknown, stale, disabled or expired accounts cannot gain
+anonymous access. Limits apply to inner TCP connections, UDP associations and
+payload, including account bandwidth, traffic quotas, expiry and first-use
+accounting. Handshakes, keepalives and encrypted overhead do not consume those
+quotas. Packet mode uses static peer authorization without account limits.
+
+Connection-mode peer admission requires a valid handshake against an eligible
+account. The server allocates peer state on demand as clients authenticate.
+Both server modes support a dynamically sized peer table. Available memory
+and processing capacity determine how many peers a node can serve.
+Every 400 ms, subject to owner-loop scheduling, the server rechecks each active
+peer's account, including quiet peers. Account expiry or a locally exhausted
+traffic quota starts retirement even when the account table has the same version.
+New handshakes and flows also check eligibility. An unchanged, eligible account
+keeps its binding across a refresh. A change of key, range or account owner
+starts retirement. The server releases the binding and its address range after
+all workers finish cleanup successfully. Reuse requires a fresh authenticated handshake.
+A failed retirement keeps the range reserved until node shutdown.
+
+Existing authenticated peers can continue under cached account enforcement and
+rekey during explicit control authentication rejection. New peers and new flows,
+including delayed flow initialization, need fresh admission. Denying a new flow
+preserves older eligible flows. Disablement, expiry, quota and key or range
+revocation still apply.
+
+In both modes, outbound traffic can restart an expired session while the
+authenticated peer's ingress line is live. The server can retain the first inner
+packet for up to 90 seconds with a 128 KiB allocation limit per peer. Further
+packets may be dropped while it waits. It sends the retained packet when it has
+a usable key and the binding and ingress line remain current.
+
+A new UDP endpoint uses one unauthenticated ingress slot until it proves a peer.
+Several peers can share an authenticated endpoint. After its last peer retires
+or moves, that endpoint may wait for a new proof. When slots run out, the
+server can close one of these unused endpoints to admit a new arrival.
+Endpoints still serving a peer keep their association. Cross-worker packet work
+is bounded to 512 messages and 8 MiB of retained allocation per node, with
+excess input or output dropped. See
+[packet ownership](https://radkesvat.github.io/WaterWall-Docs/docs/devguides/part4-packet-tunnels#wireguard-authenticated-packet-to-connection-ownership)
+and [worker ownership and retirement](https://radkesvat.github.io/WaterWall-Docs/docs/devguides/part7-shutdown-and-signals#wireguard-worker-ownership-and-retirement)
+for implementation details.

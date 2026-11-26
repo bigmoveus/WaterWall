@@ -61,12 +61,107 @@ static void caseStartRefusal(wid_t workers, bool refuse_timer)
     wgServerFixtureClose(&f, wwLifecycleStartupRollback());
 }
 
+static unsigned packet_init_count[kTosMaxWorkers];
+
+static void countPacketInit(tunnel_t *t, line_t *line)
+{
+    const wid_t wid = getCurrentWorkerWID();
+    twfRequire(line == tunnelchainGetWorkerPacketLine(t->chain, wid) && lineIsAlive(line),
+               "packet-side Init did not use the current worker's live packet line");
+    ++packet_init_count[wid];
+}
+
+static void casePacketInitPerWorker(wid_t workers)
+{
+    testCaseSet("WireGuardServer initializes its packet edge once on each worker");
+    wg_server_fixture_t f;
+    wgServerFixtureSetup(&f, workers, "");
+    f.state->ptc->fnInitU = countPacketInit;
+    memoryZero(packet_init_count, sizeof(packet_init_count));
+    twfRequire(wwStartupSucceeded(wgServerFixtureStart(&f)), "server startup failed");
+    for (wid_t wid = 0; wid < workers; ++wid)
+    {
+        twfRequire(packet_init_count[wid] == 0, "packet-side Init ran before its worker queue was pumped");
+        tosPumpWorker(&f.env, wid);
+        twfRequire(packet_init_count[wid] == 1, "worker did not receive exactly one packet-side Init");
+    }
+    wgServerFixtureClose(&f, wwLifecycleProcessShutdown());
+}
+
 static void *cancelDetached(void *argument)
 {
     twfRequire(! currentThreadIsWorker(), "foreign cancellation borrowed a worker identity");
     workerMessagesCleanupPendingDetached(argument, kWorkerMessageCancelTeardown);
     return NULL;
 }
+
+static void caseCarrierAdmissionAndDetach(void)
+{
+    testCaseSet("WireGuardServer keepalive admission and remote-worker detach");
+    wg_server_fixture_t f;
+    wgServerFixtureSetup(&f, 2, "");
+    twfRequireEqualU32(f.state->engine.padding_mtu, 1420, "connection-mode server default padding MTU");
+    twfRequire(wwStartupSucceeded(wgServerFixtureStart(&f)), "server startup failed");
+    wgServerFixtureProof(&f);
+    wgServerFixtureOpenUdp(&f);
+    wireguard_peer_t *peer = f.state->engine.first_peer;
+    twfRequire(peer->passive_keepalive && f.client_count == 0, "authenticated UDP did not arm a passive reply");
+    peer->passive_keepalive_millis = wireguardRecoveryNow() - KEEPALIVE_TIMEOUT * 1000U;
+
+    discard tosSetCurrentWorker(1);
+    line_t *carrier = f.ingress[1];
+    tunnelNextUpStreamPause(f.adapter, carrier);
+    discard tosSetCurrentWorker(0);
+    wireguardserverTick(f.state->timer);
+    twfRequire(peer->passive_keepalive && atomicLoad(&f.state->dispatch.count) == 0,
+               "paused carrier consumed the due reply");
+    discard tosSetCurrentWorker(1);
+    tunnelNextUpStreamResume(f.adapter, carrier);
+    discard tosSetCurrentWorker(0);
+
+    atomicStore(&f.state->dispatch.count, 512);
+    wireguardserverTick(f.state->timer);
+    twfRequire(peer->passive_keepalive && atomicLoad(&f.state->dispatch.count) == 512,
+               "full WireGuard dispatch consumed the due reply");
+    atomicStore(&f.state->dispatch.count, 0);
+    workerMessagesCloseAdmission(&f.env.workers[1]);
+    wireguardserverTick(f.state->timer);
+    twfRequire(peer->passive_keepalive && atomicLoad(&f.state->dispatch.count) == 0,
+               "worker refusal consumed the due reply");
+    twfRequire(workerMessagesOpenAdmission(&f.env.workers[1]), "failed to reopen carrier worker admission");
+    wireguardserverTick(f.state->timer);
+    twfRequire(! peer->passive_keepalive && atomicLoad(&f.state->dispatch.count) == 1,
+               "writable carrier failed to admit the pending reply");
+    discard tosSetCurrentWorker(1);
+    tunnelNextUpStreamPause(f.adapter, carrier);
+    tosPumpWorker(&f.env, 1);
+    twfRequire(f.client_count == 1 &&
+                   sbufGetLength(f.to_client[0]) == sizeof(message_transport_data_t) + WIREGUARD_AUTHTAG_LEN &&
+                   wireguardGetMessageType(sbufGetRawPtr(f.to_client[0]), sbufGetLength(f.to_client[0])) ==
+                       MESSAGE_TRANSPORT_DATA,
+               "a later Pause swallowed the already-admitted keepalive");
+
+    discard tosSetCurrentWorker(0);
+    peer->curr_keypair.keypair_millis = getTickMS() - REJECT_AFTER_TIME * 1000U;
+    sbuf_t  *pending                  = wgServerFixtureUdpPacket(&f, 40002);
+    uint8_t *bytes                    = sbufGetMutablePtr(pending);
+    /* Address the proved client using the engine worker's buffer. */
+    memoryCopy(bytes + 16, bytes + 12, 4);
+    twfRequire(calcFullPacketChecksum(bytes, sbufGetLength(pending)), "inner checksum failed");
+    tunnelPrevDownStreamPayload(f.state->ptc, tunnelchainGetWorkerPacketLine(f.chain, 0), pending);
+    tosPumpWorker(&f.env, 0);
+    twfRequire(f.state->binding_head->pending == pending, "keyless return packet did not occupy the binding slot");
+    discard tosSetCurrentWorker(1);
+    tunnelNextUpStreamFinish(f.adapter, carrier);
+    wgAdapterFinish(f.adapter, carrier);
+    twfRequire(f.state->binding_head->pending == NULL &&
+                   ! twfLedgerContains(g_twf_buffers.live, g_twf_buffers.live_count, pending) &&
+                   ! twfLedgerContains(g_twf_buffers.recycled, g_twf_buffers.recycled_count, pending),
+               "carrier worker retained or locally recycled another worker's pending buffer");
+    discard tosSetCurrentWorker(0);
+    wgServerFixtureClose(&f, wwLifecycleProcessShutdown());
+}
+
 static void caseQueuedShutdown(wid_t workers, bool foreign)
 {
     testCaseSet("WireGuardServer queued ingress/output shutdown");
@@ -84,11 +179,12 @@ static void caseQueuedShutdown(wid_t workers, bool foreign)
     sbufWriteZeros(junk, 4);
     tunnelNextUpStreamPayload(f.adapter, f.ingress[ingress_worker], junk);
     discard    tosSetCurrentWorker(0);
-    binding_t *binding = &f.state->bindings[0];
+    binding_t *binding = f.state->binding_head;
     sbuf_t    *packet  = bufferpoolGetSmallBuffer(f.env.pools[0]);
     sbufSetLength(packet, 4);
     sbufWriteZeros(packet, 4);
-    twfRequire(output(f.state, packet, &f.state->engine.peers[0], &binding->ingress->ip, binding->ingress->port),
+    twfRequire(wireguardserverOutput(
+                   f.state, packet, f.state->engine.first_peer, &binding->ingress->ip, binding->ingress->port),
                "authenticated output did not queue");
     twfRequire(atomic_load(&f.state->dispatch.count) == 2 && atomic_load(&binding->ingress->references) == 4,
                "queued work did not retain exact ingress ownership");
@@ -118,13 +214,14 @@ static void caseQueuedShutdown(wid_t workers, bool foreign)
                    ! twfLedgerContains(g_twf_buffers.live, g_twf_buffers.live_count, junk) &&
                    ! twfLedgerContains(g_twf_buffers.live, g_twf_buffers.live_count, packet),
                "closed admission published, rearmed, or failed to settle queued work exactly once");
-    const unsigned settled = g_twf_buffers.total_recycled;
-    discard        tosSetCurrentWorker(0);
+    discard tosSetCurrentWorker(0);
     packet = bufferpoolGetSmallBuffer(f.env.pools[0]);
     sbufSetLength(packet, 4);
-    output(f.state, packet, &f.state->engine.peers[0], &binding->ingress->ip, binding->ingress->port);
-    twfRequire(atomic_load(&f.state->dispatch.count) == 0 && g_twf_buffers.total_recycled == settled + 1,
-               "post-close output reacquired dispatch admission");
+    twfRequire(! wireguardserverOutput(
+                   f.state, packet, f.state->engine.first_peer, &binding->ingress->ip, binding->ingress->port) &&
+                   atomicLoad(&f.state->dispatch.count) == 0 &&
+                   ! twfLedgerContains(g_twf_buffers.live, g_twf_buffers.live_count, packet),
+               "post-close output retained its packet or reacquired dispatch admission");
     wgServerFixtureClose(&f, wwLifecycleProcessShutdown());
     twfRequire(f.ingress_finished == 1, "ingress was not destroyed exactly once by its creator");
 }
@@ -138,20 +235,20 @@ static void caseRetirementShutdown(wid_t workers, bool completion_pending)
     wgServerFixturePump(&f);
     wgServerFixtureProof(&f);
     wgServerFixtureOpenUdp(&f);
-    binding_t     *binding = &f.state->bindings[0];
+    binding_t     *binding = f.state->binding_head;
     const uint64_t epoch   = binding->epoch;
     if (completion_pending)
     {
         held_retirement = (held_retirement_t) {.worker_count = workers};
         wg_submit_hook  = holdRetirementCompletion;
     }
-    retireBinding(f.state, 0);
-    twfRequire(binding->occupied && binding->retiring && ! binding->usable && ! atomic_load(&binding->retirement_done),
+    wireguardserverRetireBinding(f.state, binding);
+    twfRequire(wireguardserverBindingByEpoch(f.state, epoch) == binding && binding->retiring && ! binding->usable,
                "retirement did not close the existing binding before posting owner work");
     if (completion_pending)
     {
         wgServerFixturePump(&f);
-        twfRequire(held_retirement.callback != NULL && ! atomic_load(&binding->retirement_done),
+        twfRequire(held_retirement.callback != NULL && wireguardserverBindingByEpoch(f.state, epoch) == binding,
                    "completion was not held behind the owner acknowledgments");
         wg_submit_hook = NULL;
     }
@@ -162,23 +259,25 @@ static void caseRetirementShutdown(wid_t workers, bool completion_pending)
         twfRequire(pthread_create(&thread, NULL, cancelHeldRetirement, NULL) == 0 && pthread_join(thread, NULL) == 0,
                    "foreign retirement completion cleanup failed");
     }
-    twfRequire(atomic_load(&binding->retirement_done) && ! atomic_load(&binding->retirement_ok) && binding->occupied &&
-                   binding->retiring && ! binding->usable && binding->epoch == epoch,
+    twfRequire(wireguardserverBindingByEpoch(f.state, epoch) == binding && binding->retiring && ! binding->usable &&
+                   binding->epoch == epoch,
                "canceled retirement reopened a range or lost its binding context");
-    reconcile(f.state);
-    twfRequire(binding->occupied && binding->retiring && binding->epoch == epoch,
+    wireguardserverReconcile(f.state, false);
+    twfRequire(wireguardserverBindingByEpoch(f.state, epoch) == binding && binding->retiring && binding->epoch == epoch,
                "failed retirement completion permitted range reuse");
     wgServerFixtureClose(&f, wwLifecycleProcessShutdown());
 }
 
 int main(void)
 {
+    caseCarrierAdmissionAndDetach();
     for (wid_t workers = 1; workers <= 4; workers += 3)
     {
-        casePartialConstruction(workers, ",\"mtu\":67");
+        casePartialConstruction(workers, ",\"max-pending-bytes\":0");
         casePartialConstruction(workers, ",\"sweep-interval-ms\":0");
         caseStartRefusal(workers, false);
         caseStartRefusal(workers, true);
+        casePacketInitPerWorker(workers);
         caseQueuedShutdown(workers, false);
         caseQueuedShutdown(workers, true);
         caseRetirementShutdown(workers, false);

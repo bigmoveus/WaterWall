@@ -23,28 +23,28 @@ bool wireguardCommonInit(wireguard_device_t *device, const char *private_key, vo
         device->context   = context;
         device->callbacks = callbacks;
     }
+    else
+    {
+        *device = (wireguard_device_t) {0};
+    }
     return valid;
 }
 
-bool wireguardCommonRangesOverlap(const wireguard_allowed_ip_t *a, const wireguard_allowed_ip_t *b)
+bool wireguardCommonConfigureMtu(wireguard_device_t *device, const cJSON *settings)
 {
-    if (! a->valid || ! b->valid || a->ip.type != b->ip.type)
+    int64_t                   mtu    = min(CORE_DEFAULT_MTU, WIREGUARDIF_MTU);
+    const json_value_status_t status = jsonGetObjectIntegerInRange(settings, "mtu", 68, UINT16_MAX, &mtu);
+    if (status == kJsonValueInvalid || mtu < 68)
+    {
+        LOGF("WireGuard: settings.mtu must be an integer between 68 and 65535%s",
+             status == kJsonValueMissing ? "; inherited core misc.mtu is too small; set an explicit node mtu" : "");
         return false;
-    if (IP_IS_V4(&a->ip))
-    {
-        const uint32_t mask = ip_2_ip4(&a->mask)->addr & ip_2_ip4(&b->mask)->addr;
-        return (ip_2_ip4(&a->ip)->addr & mask) == (ip_2_ip4(&b->ip)->addr & mask);
     }
-    for (int i = 0; i < 4; ++i)
-    {
-        const uint32_t mask = ip_2_ip6(&a->mask)->addr[i] & ip_2_ip6(&b->mask)->addr[i];
-        if ((ip_2_ip6(&a->ip)->addr[i] & mask) != (ip_2_ip6(&b->ip)->addr[i] & mask))
-            return false;
-    }
+    device->padding_mtu = (uint16_t) mtu;
     return true;
 }
 
-bool wireguardCommonAddConfiguredPeer(wireguard_device_t *device, const cJSON *settings, uint8_t *index)
+bool wireguardCommonAddConfiguredPeer(wireguard_device_t *device, const cJSON *settings, size_t *index)
 {
     const cJSON *public_key = cJSON_GetObjectItemCaseSensitive(settings, "publickey");
     const cJSON *psk        = cJSON_GetObjectItemCaseSensitive(settings, "presharedkey");
@@ -59,14 +59,13 @@ bool wireguardCommonAddConfiguredPeer(wireguard_device_t *device, const cJSON *s
         allowed->valuestring[0] == '\0' ||
         (keepalive != NULL &&
          (! cJSON_IsNumber(keepalive) || keepalive->valuedouble < 0 || keepalive->valuedouble > UINT16_MAX ||
-          keepalive->valuedouble != (double) keepalive->valueint)) ||
-        peerLookupByPubkey(device, key) != NULL)
+          keepalive->valuedouble != (double) keepalive->valueint)))
         goto finish;
 
-    wireguard_peer_t *peer = peerAlloc(device);
-    if (peer == NULL || ! wireguardPeerInit(device, peer, key, psk != NULL ? preshared : NULL))
+    wireguard_peer_t *peer = wireguardPeerCreate(device, key, psk != NULL ? preshared : NULL);
+    if (peer == NULL)
         goto finish;
-    *index                   = wireguardPeerIndex(device, peer);
+    *index                   = peer->id;
     peer->keepalive_interval = keepalive != NULL ? (uint16_t) keepalive->valueint : 0;
     char    *ranges          = stringNewWithoutSpace(allowed->valuestring);
     char    *cursor          = ranges;
@@ -92,6 +91,6 @@ finish:
     wCryptoZero(key, sizeof(key));
     wCryptoZero(preshared, sizeof(preshared));
     if (! result)
-        LOGE("WireGuard: invalid peer key, allowedips, keepalive, duplicate key or peer capacity exceeded");
+        LOGE("WireGuard: invalid peer key, allowedips, keepalive or duplicate peer");
     return result;
 }
